@@ -1,0 +1,18 @@
+<svg width="372.72406mm" height="354.72815mm" viewBox="0 0 372.72406 354.72815" xmlns="http://www.w3.org/2000/svg">
+  <rect width="372.72406" height="354.72815" fill="#1e1e1e"/>
+  <!-- DocSkill watermark: icon geometry in dim gray, no background rect -->
+  <g transform="translate(81.362,40) scale(0.8203)" opacity="1">
+    <!-- Vertical bar: #2d2d2d on #1e1e1e = subtle watermark -->
+    <rect x="39" y="35" width="51" height="186" fill="#2d2d2d"/>
+    <!-- Horizontal bars -->
+    <rect x="90" y="70"  width="71" height="16" fill="#2d2d2d"/>
+    <rect x="90" y="95"  width="91" height="16" fill="#2d2d2d"/>
+    <rect x="90" y="120" width="79" height="16" fill="#2d2d2d"/>
+    <rect x="90" y="145" width="91" height="16" fill="#2d2d2d"/>
+    <rect x="90" y="170" width="62" height="16" fill="#2d2d2d"/>
+  </g>
+  <!-- Product name - white -->
+  <text x="186.362" y="258" font-family="'Segoe UI','Liberation Sans',Arial,sans-serif" font-size="26" font-weight="600" fill="#e1e1e1" text-anchor="middle">DocSkill Office</text>
+  <!-- Tagline - gray -->
+  <text x="186.362" y="282" font-family="'Segoe UI','Liberation Sans',Arial,sans-serif" font-size="13" font-weight="400" fill="#6a6a6a" text-anchor="middle">The AI-Powered Office Suite</text>
+</svg>

@@ -1,0 +1,133 @@
+/* -*- Mode: C++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
+/*
+ * This file is part of the LibreOffice project.
+ *
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ *
+ * This file incorporates work covered by the following license notice:
+ *
+ *   Licensed to the Apache Software Foundation (ASF) under one or more
+ *   contributor license agreements. See the NOTICE file distributed
+ *   with this work for additional information regarding copyright
+ *   ownership. The ASF licenses this file to you under the Apache
+ *   License, Version 2.0 (the "License"); you may not use this file
+ *   except in compliance with the License. You may obtain a copy of
+ *   the License at http://www.apache.org/licenses/LICENSE-2.0 .
+ */
+
+#include <svx/autoformathelper.hxx>
+#include <tools/stream.hxx>
+#include <editeng/legacyitem.hxx>
+#include <editeng/fontitem.hxx>
+#include <editeng/fhgtitem.hxx>
+#include <editeng/wghtitem.hxx>
+#include <editeng/postitem.hxx>
+#include <editeng/udlnitem.hxx>
+#include <editeng/crossedoutitem.hxx>
+#include <editeng/contouritem.hxx>
+#include <editeng/shdditem.hxx>
+#include <editeng/colritem.hxx>
+#include <editeng/boxitem.hxx>
+#include <editeng/lineitem.hxx>
+#include <editeng/brushitem.hxx>
+#include <editeng/adjustitem.hxx>
+#include <editeng/justifyitem.hxx>
+#include <svl/eitem.hxx>
+#include <svx/algitem.hxx>
+#include <svl/intitem.hxx>
+#include <svx/rotmodit.hxx>
+#include <osl/thread.h>
+
+//////////////////////////////////////////////////////////////////////////////
+
+void AutoFormatBase::SetFont( const SvxFontItem& rNew )             { m_aFont.reset(rNew.Clone()); }
+void AutoFormatBase::SetHeight( const SvxFontHeightItem& rNew )     { m_aHeight.reset(rNew.Clone()); }
+void AutoFormatBase::SetWeight( const SvxWeightItem& rNew )         { m_aWeight.reset(rNew.Clone()); }
+void AutoFormatBase::SetPosture( const SvxPostureItem& rNew )       { m_aPosture.reset(rNew.Clone()); }
+void AutoFormatBase::SetCJKFont( const SvxFontItem& rNew )          { m_aCJKFont.reset(rNew.Clone()); }
+void AutoFormatBase::SetCJKHeight( const SvxFontHeightItem& rNew )  { m_aCJKHeight.reset(rNew.Clone()); }
+void AutoFormatBase::SetCJKWeight( const SvxWeightItem& rNew )      { m_aCJKWeight.reset(rNew.Clone()); }
+void AutoFormatBase::SetCJKPosture( const SvxPostureItem& rNew )    { m_aCJKPosture.reset(rNew.Clone()); }
+void AutoFormatBase::SetCTLFont( const SvxFontItem& rNew )          { m_aCTLFont.reset(rNew.Clone()); }
+void AutoFormatBase::SetCTLHeight( const SvxFontHeightItem& rNew )  { m_aCTLHeight.reset(rNew.Clone()); }
+void AutoFormatBase::SetCTLWeight( const SvxWeightItem& rNew )      { m_aCTLWeight.reset(rNew.Clone()); }
+void AutoFormatBase::SetCTLPosture( const SvxPostureItem& rNew )    { m_aCTLPosture.reset(rNew.Clone()); }
+void AutoFormatBase::SetUnderline( const SvxUnderlineItem& rNew )   { m_aUnderline.reset(rNew.Clone()); }
+void AutoFormatBase::SetOverline( const SvxOverlineItem& rNew )     { m_aOverline.reset(rNew.Clone()); }
+void AutoFormatBase::SetCrossedOut( const SvxCrossedOutItem& rNew ) { m_aCrossedOut.reset(rNew.Clone()); }
+void AutoFormatBase::SetContour( const SvxContourItem& rNew )       { m_aContour.reset(rNew.Clone()); }
+void AutoFormatBase::SetShadowed( const SvxShadowedItem& rNew )     { m_aShadowed.reset(rNew.Clone()); }
+void AutoFormatBase::SetColor( const SvxColorItem& rNew )           { m_aColor.reset(rNew.Clone()); }
+void AutoFormatBase::SetBox( const SvxBoxItem& rNew )               { m_aBox.reset(rNew.Clone()); }
+void AutoFormatBase::SetTLBR( const SvxLineItem& rNew )             { m_aTLBR.reset(rNew.Clone()); }
+void AutoFormatBase::SetBLTR( const SvxLineItem& rNew )             { m_aBLTR.reset(rNew.Clone()); }
+void AutoFormatBase::SetBackground( const SvxBrushItem& rNew )      { m_aBackground.reset(rNew.Clone()); }
+void AutoFormatBase::SetAdjust( const SvxAdjustItem& rNew )         { m_aAdjust.reset(rNew.Clone()); }
+void AutoFormatBase::SetHorJustify( const SvxHorJustifyItem& rNew ) { m_aHorJustify.reset(rNew.Clone()); }
+void AutoFormatBase::SetVerJustify( const SvxVerJustifyItem& rNew ) { m_aVerJustify.reset(rNew.Clone()); }
+
+AutoFormatBase::AutoFormatBase(const AutoFormatWhichIds& rIds)
+    : m_aFont(std::make_unique<SvxFontItem>(rIds.nFont))
+    , m_aHeight(std::make_unique<SvxFontHeightItem>(240, 100, rIds.nHeight))
+    , m_aWeight(std::make_unique<SvxWeightItem>(WEIGHT_NORMAL, rIds.nWeight))
+    , m_aPosture(std::make_unique<SvxPostureItem>(ITALIC_NONE, rIds.nPosture))
+    , m_aCJKFont(std::make_unique<SvxFontItem>(rIds.nCJKFont))
+    , m_aCJKHeight(std::make_unique<SvxFontHeightItem>(240, 100, rIds.nCJKHeight))
+    , m_aCJKWeight(std::make_unique<SvxWeightItem>(WEIGHT_NORMAL, rIds.nCJKWeight))
+    , m_aCJKPosture(std::make_unique<SvxPostureItem>(ITALIC_NONE, rIds.nCJKPosture))
+    , m_aCTLFont(std::make_unique<SvxFontItem>(rIds.nCTLFont))
+    , m_aCTLHeight(std::make_unique<SvxFontHeightItem>(240, 100, rIds.nCTLHeight))
+    , m_aCTLWeight(std::make_unique<SvxWeightItem>(WEIGHT_NORMAL, rIds.nCTLWeight))
+    , m_aCTLPosture(std::make_unique<SvxPostureItem>(ITALIC_NONE, rIds.nCTLPosture))
+    , m_aUnderline(std::make_unique<SvxUnderlineItem>(LINESTYLE_NONE, rIds.nUnderline))
+    , m_aOverline(std::make_unique<SvxOverlineItem>(LINESTYLE_NONE, rIds.nOverline))
+    , m_aCrossedOut(std::make_unique<SvxCrossedOutItem>(STRIKEOUT_NONE, rIds.nCrossedOut))
+    , m_aContour(std::make_unique<SvxContourItem>(false, rIds.nContour))
+    , m_aShadowed(std::make_unique<SvxShadowedItem>(false, rIds.nShadowed))
+    , m_aColor(std::make_unique<SvxColorItem>(rIds.nColor))
+    , m_aBox(std::make_unique<SvxBoxItem>(rIds.nBox))
+    , m_aTLBR(std::make_unique<SvxLineItem>(rIds.nTLBR))
+    , m_aBLTR(std::make_unique<SvxLineItem>(rIds.nBLTR))
+    , m_aBackground(std::make_unique<SvxBrushItem>(rIds.nBackground))
+    , m_aAdjust(std::make_unique<SvxAdjustItem>(SvxAdjust::Left, rIds.nAdjust))
+    , m_aHorJustify(std::make_unique<SvxHorJustifyItem>(SvxCellHorJustify::Standard, rIds.nHorJustify))
+    , m_aVerJustify(std::make_unique<SvxVerJustifyItem>(SvxCellVerJustify::Standard, rIds.nVerJustify))
+{
+}
+
+AutoFormatBase::AutoFormatBase( const AutoFormatBase& rNew )
+:   m_aFont(rNew.m_aFont->Clone()),
+    m_aHeight(rNew.m_aHeight->Clone()),
+    m_aWeight(rNew.m_aWeight->Clone()),
+    m_aPosture(rNew.m_aPosture->Clone()),
+    m_aCJKFont(rNew.m_aCJKFont->Clone()),
+    m_aCJKHeight(rNew.m_aCJKHeight->Clone()),
+    m_aCJKWeight(rNew.m_aCJKWeight->Clone()),
+    m_aCJKPosture(rNew.m_aCJKPosture->Clone()),
+    m_aCTLFont(rNew.m_aCTLFont->Clone()),
+    m_aCTLHeight(rNew.m_aCTLHeight->Clone()),
+    m_aCTLWeight(rNew.m_aCTLWeight->Clone()),
+    m_aCTLPosture(rNew.m_aCTLPosture->Clone()),
+    m_aUnderline(rNew.m_aUnderline->Clone()),
+    m_aOverline(rNew.m_aOverline->Clone()),
+    m_aCrossedOut(rNew.m_aCrossedOut->Clone()),
+    m_aContour(rNew.m_aContour->Clone()),
+    m_aShadowed(rNew.m_aShadowed->Clone()),
+    m_aColor(rNew.m_aColor->Clone()),
+    m_aBox(rNew.m_aBox->Clone()),
+    m_aTLBR(rNew.m_aTLBR->Clone()),
+    m_aBLTR(rNew.m_aBLTR->Clone()),
+    m_aBackground(rNew.m_aBackground->Clone()),
+    m_aAdjust(rNew.m_aAdjust->Clone()),
+    m_aHorJustify(rNew.m_aHorJustify->Clone()),
+    m_aVerJustify(rNew.m_aVerJustify->Clone())
+{
+}
+
+AutoFormatBase::~AutoFormatBase()
+{
+}
+
+/* vim:set shiftwidth=4 softtabstop=4 expandtab: */

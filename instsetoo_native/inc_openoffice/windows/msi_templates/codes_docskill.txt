@@ -1,0 +1,19 @@
+# DocSkill Office MSI codes file.
+#
+# UPGRADECODE must stay STABLE across all DocSkill Office releases —
+# it is what allows a newer MSI to perform a major upgrade over an
+# installed older version. Never reuse LibreOffice's UpgradeCode.
+#
+# PRODUCTCODE entries below are only used when preparing Windows
+# patches (prepare_winpatch); for normal builds make_installer
+# generates a fresh ProductCode GUID automatically, which is what a
+# major-upgrade auto-update flow needs.
+
+[PRODUCTCODE]
+en-US = "{CA7035EC-1EDD-450D-917A-A8151A62094E}"
+zh-CN = "{857CB319-80F3-444E-BC25-E075C6605E96}"
+multiwestern = "{B1DFBD49-3775-446A-80F0-597177A1AA64}"
+multiasia = "{1809C55F-ACF9-4BA9-9C69-7EBADBDFFAE4}"
+
+[UPGRADECODE]
+en-US = "{7E4D521C-F99C-49CD-846B-C891BF3CC4F4}"

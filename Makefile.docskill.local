@@ -1,0 +1,5 @@
+# Auto-generated: force-old external/other libs so Library_sw only rebuilds sw
+define _docskill_old
+$(1):
+	@true
+endef

@@ -1,0 +1,10 @@
+#
+# This file is part of the LibreOffice project.
+#
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+#
+
+# This file is used by the LODE configuration for the ASan/UBSan build, see -fsanitize-blacklist in
+# the lode repo's bin/lode_ubsan_env (and is currently effectively empty).

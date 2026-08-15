@@ -1,0 +1,12 @@
+--- third_party/freetype/src/include/freetype/config/public-macros.h
++++ third_party/freetype/src/include/freetype/config/public-macros.h
+@@ -73,8 +73,7 @@
+
+   /* gcc, clang */
+ #elif ( defined( __GNUC__ ) && __GNUC__ >= 4 ) || defined( __clang__ )
+-#define FT_PUBLIC_FUNCTION_ATTRIBUTE \
+-          __attribute__(( visibility( "default" ) ))
++#define FT_PUBLIC_FUNCTION_ATTRIBUTE  /* hidden, pdfium internal */
+
+   /* Sun */
+ #elif defined( __SUNPRO_C ) && __SUNPRO_C >= 0x550

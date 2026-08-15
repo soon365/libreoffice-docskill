@@ -1,0 +1,99 @@
+/* -*- Mode: C++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4     -*- */
+/*
+ * This file is part of the LibreOffice project.
+ *
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ */
+
+#include <templatedefaultview.hxx>
+#include <sfx2/thumbnailview.hxx>
+#include <templateviewitem.hxx>
+#include <sfx2/sfxresid.hxx>
+#include <vcl/event.hxx>
+#include <vcl/svapp.hxx>
+#include <vcl/weld/Menu.hxx>
+
+#include <sfx2/strings.hrc>
+
+#include <officecfg/Office/Common.hxx>
+
+constexpr int gnItemPadding(5); //TODO:: Change padding to 10. It looks really crowded and occupied.
+constexpr tools::Long gnTextHeight = 30;
+
+TemplateDefaultView::TemplateDefaultView(std::unique_ptr<weld::ScrolledWindow> xWindow,
+                                         std::unique_ptr<weld::Menu> xMenu)
+    : TemplateLocalView(std::move(xWindow), std::move(xMenu))
+{
+    mbAllowMultiSelection = false;
+    AbsoluteScreenPixelRectangle aScreen = Application::GetScreenPosSizePixel(Application::GetDisplayBuiltInScreen());
+    tools::Long nItemMaxSize = std::min(aScreen.GetWidth(),aScreen.GetHeight()) > 800 ? 256 : 192;
+    ThumbnailView::setItemDimensions( nItemMaxSize, nItemMaxSize, gnTextHeight, gnItemPadding );
+    updateThumbnailDimensions(nItemMaxSize);
+
+    mfHighlightTransparence = 0.75;
+
+    UpdateColors(Application::GetSettings().GetStyleSettings());
+}
+
+void TemplateDefaultView::UpdateColors(const StyleSettings& rSettings)
+{
+    TemplateLocalView::UpdateColors(rSettings);
+
+    // DocSkill: use the standard light window background/text so the template
+    // grid forms one continuous surface with the DocSkill browse tabs and the
+    // rest of the Start Center, instead of the stock dark-grey thumbnail canvas.
+    maFillColor = rSettings.GetWindowColor();
+    maTextColor = rSettings.GetWindowTextColor();
+
+    maHighlightColor = rSettings.GetHighlightColor();
+    maHighlightTextColor = rSettings.GetHighlightTextColor();
+}
+
+void TemplateDefaultView::showAllTemplates()
+{
+    mnCurRegionId = 0;
+
+    insertItems(maAllTemplates, false);
+}
+
+bool TemplateDefaultView::KeyInput( const KeyEvent& rKEvt )
+{
+    return ThumbnailView::KeyInput(rKEvt);
+}
+
+bool TemplateDefaultView::MouseButtonDown( const MouseEvent& rMEvt )
+{
+    if( rMEvt.IsLeft() && rMEvt.GetClicks() == 1 )
+    {
+        size_t nPos = ImplGetItem(rMEvt.GetPosPixel());
+        ThumbnailViewItem* pItem = ImplGetItem(nPos);
+        TemplateViewItem* pViewItem = dynamic_cast<TemplateViewItem*>(pItem);
+        if(pViewItem)
+            maOpenTemplateHdl.Call(pViewItem->getPath());
+        return true;
+    }
+
+    return TemplateLocalView::MouseButtonDown(rMEvt);
+}
+
+void TemplateDefaultView::createContextMenu(const bool bIsBuiltIn)
+{
+    mxContextMenu->clear();
+    mxContextMenu->append(u"open"_ustr,SfxResId(STR_OPEN));
+    mxContextMenu->append(u"edit"_ustr,SfxResId(STR_EDIT_TEMPLATE));
+
+    if (bIsBuiltIn)
+    {
+        mxContextMenu->set_sensitive(u"edit"_ustr, false);
+    }
+
+    deselectItems();
+    mpSelectedItem->setSelection(true);
+    maItemStateHdl.Call(mpSelectedItem);
+    ContextMenuSelectHdl(mxContextMenu->popup_at_rect(GetDrawingArea(), tools::Rectangle(maPosition, Size(1,1))));
+    Invalidate();
+}
+
+/* vim:set shiftwidth=4 softtabstop=4 expandtab: */

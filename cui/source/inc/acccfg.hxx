@@ -1,0 +1,166 @@
+/* -*- Mode: C++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
+/*
+ * This file is part of the LibreOffice project.
+ *
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ *
+ * This file incorporates work covered by the following license notice:
+ *
+ *   Licensed to the Apache Software Foundation (ASF) under one or more
+ *   contributor license agreements. See the NOTICE file distributed
+ *   with this work for additional information regarding copyright
+ *   ownership. The ASF licenses this file to you under the Apache
+ *   License, Version 2.0 (the "License"); you may not use this file
+ *   except in compliance with the License. You may obtain a copy of
+ *   the License at http://www.apache.org/licenses/LICENSE-2.0 .
+ */
+
+#pragma once
+
+#include <com/sun/star/ui/XAcceleratorConfiguration.hpp>
+#include <com/sun/star/uno/XComponentContext.hpp>
+#include <com/sun/star/container/XNameAccess.hpp>
+#include <com/sun/star/frame/XFrame.hpp>
+
+#include <sfx2/tabdlg.hxx>
+#include <vcl/timer.hxx>
+#include <vcl/keycod.hxx>
+#include <vcl/weld/Button.hxx>
+#include <vcl/weld/ComboBox.hxx>
+#include <vcl/weld/Entry.hxx>
+#include <vcl/weld/RadioButton.hxx>
+#include <i18nutil/searchopt.hxx>
+#include <config_features.h>
+#include "cfgutil.hxx"
+
+#if HAVE_FEATURE_SCRIPTING
+class SfxMacroInfoItem;
+#endif
+
+// class SfxAcceleratorConfigPage ----------------------------------------
+
+namespace sfx2
+{
+class FileDialogHelper;
+}
+
+enum class StartFileDialogType
+{
+    Open,
+    SaveAs
+};
+
+class ComponentDisposedListener;
+struct AssignmentData;
+
+class SfxAcceleratorConfigPage : public SfxTabPage
+{
+private:
+#if HAVE_FEATURE_SCRIPTING
+    const SfxMacroInfoItem* m_pMacroInfoItem;
+#endif
+    std::unique_ptr<sfx2::FileDialogHelper> m_pFileDlg;
+
+    OUString aLoadAccelConfigStr;
+    OUString aSaveAccelConfigStr;
+    OUString aFilterAllStr;
+    OUString aFilterCfgStr;
+    SfxStylesInfo_Impl m_aStylesInfo;
+    bool m_bStylesInfoInitialized;
+    // Array of reserved key codes in sorted order
+    std::vector<sal_uInt16> m_aReservedKeyCodes;
+
+    // Lazily created assignment data for each accelerator configuration
+    std::vector<AssignmentData> m_aAssignmentData;
+
+    css::uno::Reference<css::uno::XComponentContext> m_xContext;
+    css::uno::Reference<css::ui::XAcceleratorConfiguration> m_xGlobal;
+    css::uno::Reference<css::ui::XAcceleratorConfiguration> m_xModule;
+    css::uno::Reference<css::ui::XAcceleratorConfiguration> m_xDocument;
+    css::uno::Reference<css::ui::XAcceleratorConfiguration> m_xAct;
+    css::uno::Reference<css::container::XNameAccess> m_xUICmdDescription;
+    css::uno::Reference<css::frame::XFrame> m_xFrame;
+
+    OUString m_sModuleLongName;
+    OUString m_sModuleUIName;
+
+    // For search
+    Timer m_aUpdateDataTimer;
+    i18nutil::SearchOptions2 m_options;
+
+    std::unique_ptr<weld::TreeView> m_xEntriesBox;
+    std::unique_ptr<weld::RadioButton> m_xOfficeButton;
+    std::unique_ptr<weld::RadioButton> m_xModuleButton;
+    std::unique_ptr<weld::RadioButton> m_xDocumentButton;
+    std::unique_ptr<weld::Button> m_xChangeButton;
+    std::unique_ptr<weld::Button> m_xRemoveButton;
+    std::unique_ptr<CuiConfigGroupListBox> m_xGroupLBox;
+    std::unique_ptr<CuiConfigFunctionListBox> m_xFunctionBox;
+    std::unique_ptr<weld::TreeView> m_xKeyBox;
+    std::unique_ptr<weld::Entry> m_xSearchEdit;
+    std::unique_ptr<weld::Button> m_xLoadButton;
+    std::unique_ptr<weld::Button> m_xSaveButton;
+    std::unique_ptr<weld::Button> m_xResetButton;
+    std::unique_ptr<weld::ComboBox> m_xSaveInListBox;
+
+    rtl::Reference<ComponentDisposedListener> m_xComponentDisposedListener;
+    friend class ComponentDisposedListener;
+
+    DECL_LINK(ChangeHdl, weld::Button&, void);
+    DECL_LINK(RemoveHdl, weld::Button&, void);
+    DECL_LINK(SelectHdl, weld::ItemView&, void);
+    DECL_LINK(SearchUpdateHdl, weld::Entry&, void);
+    DECL_LINK(Save, weld::Button&, void);
+    DECL_LINK(Load, weld::Button&, void);
+    DECL_LINK(Default, weld::Button&, void);
+    DECL_LINK(RadioHdl, weld::Toggleable&, void);
+    DECL_LINK(DocumentRadioHdl, weld::Toggleable&, void);
+    DECL_LINK(SelectSaveInLocation, weld::ComboBox&, void);
+    DECL_LINK(ImplUpdateDataHdl, Timer*, void);
+    DECL_LINK(FocusOut_Impl, weld::Widget&, void);
+
+    DECL_LINK(KeyInputHdl, const KeyEvent&, bool);
+
+    DECL_LINK(LoadHdl, sfx2::FileDialogHelper*, void);
+    DECL_LINK(SaveHdl, sfx2::FileDialogHelper*, void);
+
+    OUString GetLabel4Command(const OUString& rCommand);
+    int applySearchFilter(OUString const& rSearchTerm);
+    void InitAccCfg();
+    sal_Int32 MapKeyCodeToPos(const vcl::KeyCode& rCode) const;
+    void StartFileDialog(StartFileDialogType nType, const OUString& rTitle);
+
+    void
+    LoadAcceleratorConfig(const css::uno::Reference<css::ui::XAcceleratorConfiguration>& pAccMgr);
+    void Init();
+    void ResetConfig();
+    void ClearSaveInComboBox();
+    void AddFrameToSaveInComboBox(const css::uno::Reference<css::frame::XFrame>& xFrame);
+    void FillSaveInComboBox();
+    void HandleScopeChanged();
+    bool IsReservedKeyCode(const vcl::KeyCode& rCode) const;
+    static std::vector<sal_uInt16> GetReservedKeyCodes();
+    // Find the assignments array for the current configuration or return nullptr if there isn’t one
+    // yet
+    std::vector<OUString>* FindAssignments();
+    // Get the assignments for the current configuration or lazily create it if there isn’t one yet
+    std::vector<OUString>& GetAssignments();
+    static void Apply(const css::uno::Reference<css::ui::XAcceleratorConfiguration>& pAccMgr,
+                      const std::vector<OUString>& rAssignments);
+    void Apply(const css::uno::Reference<css::ui::XAcceleratorConfiguration>& pAccMgr)
+    {
+        Apply(pAccMgr, GetAssignments());
+    };
+
+public:
+    SfxAcceleratorConfigPage(weld::Container* pPage, weld::DialogController* pController,
+                             const SfxItemSet& rItemSet);
+    virtual ~SfxAcceleratorConfigPage() override;
+
+    virtual bool FillItemSet(SfxItemSet*) override;
+    virtual void Reset(const SfxItemSet*) override;
+};
+
+/* vim:set shiftwidth=4 softtabstop=4 expandtab: */

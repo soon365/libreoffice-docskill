@@ -1,0 +1,142 @@
+--- c/shared/include/cffwrite.h
++++ c/shared/include/cffwrite.h
+@@ -168,7 +168,7 @@
+    compatible with a destination font dict of the same FontName, the function
+    returns 1 else it returns 0. */
+ 
+-int cfwMergeFDArray(cfwCtx h, abfTopDict *top, int *newFDIndex);
++long cfwMergeFDArray(void *h, abfTopDict *top, int *newFDIndex);
+ 
+ /* cfwMergeFDArray() merges all the fdArray font dicts of the passed-in source
+    font top dict into the destination font. It also fills in the array pointed
+--- c/shared/cffwrite/cffwrite.cpp
++++ c/shared/cffwrite/cffwrite.cpp
+@@ -469,7 +469,8 @@
+     return newFDIndex;
+ }
+ 
+-int cfwMergeFDArray(cfwCtx g, abfTopDict *top, int *newFDIndex) {
++long cfwMergeFDArray(void *g_, abfTopDict *top, int *newFDIndex) {
++    cfwCtx g = (cfwCtx)g_;
+     abfFontDict *srcDict = &top->FDArray.array[0];
+     int i = 0;
+ 
+--- c/shared/dynarr.c
++++ c/shared/dynarr.c
+@@ -68,6 +68,9 @@
+    0. If the client has arranged to trap allocation failures in the memory
+    callback functions by using setjmp/longjmp, for example, the -1 return will
+    never occur and the macro wrappers provided will be safe to use. */
++#if defined __clang__
++__attribute__((no_sanitize("function")))
++#endif
+ long dnaGrow(void *object, size_t elemsize, long index) {
+     void *new_ptr;
+     size_t new_size;
+--- c/shared/pstoken.cpp
++++ c/shared/pstoken.cpp
+@@ -199,7 +199,7 @@
+         else {
+             unsigned char cipher = hi_nib << 4 | nib;
+             *dst++ = cipher ^ (h->cipher.r >> 8);
+-            h->cipher.r = (cipher + h->cipher.r) * 52845 + 22719;
++            h->cipher.r = (unsigned)(cipher + h->cipher.r) * 52845 + 22719;
+             hi_nib = -1;
+         }
+     } while (src < end);
+@@ -230,7 +230,7 @@
+     for (i = 0; i < length; i++) {
+         unsigned char cipher = *src++;
+         *dst++ = cipher ^ (h->cipher.r >> 8);
+-        h->cipher.r = (cipher + h->cipher.r) * 52845 + 22719;
++        h->cipher.r = (unsigned)(cipher + h->cipher.r) * 52845 + 22719;
+     }
+ 
+     return 0;
+--- c/shared/t1cstr.cpp
++++ c/shared/t1cstr.cpp
+@@ -1494,13 +1494,13 @@
+ 
+         /* Prime state from random initial bytes */
+         while (lenIV--)
+-            r = (*c++ + r) * 52845 + 22719;
++            r = (unsigned)(*c++ + r) * 52845 + 22719;
+ 
+         /* Decrypt and copy bytes */
+         while (cnt--) {
+             unsigned char c1 = *c++;
+             *p++ = c1 ^ (r >> 8);
+-            r = (c1 + r) * 52845 + 22719;
++            r = (unsigned)(c1 + r) * 52845 + 22719;
+         }
+     }
+     return t1cSuccess;
+@@ -1524,7 +1524,7 @@
+         while (lenIV--) {
+             single = *c ^ (r2 >> 8);
+             r2 = (*c++ + r2) * 16477 + 21483;
+-            r1 = (single + r1) * 52845 + 22719;
++            r1 = (unsigned)(single + r1) * 52845 + 22719;
+         }
+ 
+         /* Double decrypt and copy bytes */
+@@ -1533,7 +1533,7 @@
+             single = c1 ^ (r2 >> 8);
+             r2 = (c1 + r2) * 16477 + 21483;
+             *p++ = single ^ (r1 >> 8);
+-            r1 = (single + r1) * 52845 + 22719;
++            r1 = (unsigned)(single + r1) * 52845 + 22719;
+         }
+     }
+     return t1cSuccess;
+--- c/shared/t1write/t1write.cpp
++++ c/shared/t1write/t1write.cpp
+@@ -166,7 +166,7 @@
+     char *q = buf;
+     while (cnt--) {
+         uint8_t c = *p++ ^ h->eexec.r >> 8;
+-        h->eexec.r = (c + h->eexec.r) * 52845 + 22719;
++        h->eexec.r = (unsigned)(c + h->eexec.r) * 52845 + 22719;
+         *q++ = hexmap[c >> 4 & 0xf];
+         *q++ = hexmap[c & 0xf];
+     }
+@@ -192,7 +192,7 @@
+             /* Binary eexec; encrypt in-place */
+             while (cnt--) {
+                 uint8_t c = *p ^ h->eexec.r >> 8;
+-                h->eexec.r = (c + h->eexec.r) * 52845 + 22719;
++                h->eexec.r = (unsigned)(c + h->eexec.r) * 52845 + 22719;
+                 *p++ = c;
+             }
+             writeDst(h, h->dst.cnt, h->dst.buf);
+@@ -355,7 +355,7 @@
+     p = data;
+     for (i = 0; i < length; i++) {
+         uint8_t c = *p ^ (r >> 8);
+-        r = (c + r) * 52845 + 22719;
++        r = (unsigned)(c + r) * 52845 + 22719;
+         *p++ = c;
+     }
+ 
+--- c/shared/t2cstr.cpp
++++ c/shared/t2cstr.cpp
+@@ -661,7 +661,7 @@
+ 
+     /* Compute mask length and unused bit mask */
+     h->mask.length = (short)((h->stems.cnt + 7) / 8);
+-    h->mask.unused = ~(~0 << (h->mask.length * 8 - h->stems.cnt));
++    h->mask.unused = ~(~0U << (h->mask.length * 8 - h->stems.cnt));
+ 
+     return 0;
+ }
+--- c/shared/ttread.cpp
++++ c/shared/ttread.cpp
+@@ -673,7 +673,7 @@
+ 
+ /* Read 4-byte signed number. */
+ static int32_t sread4(ttrCtx h) {
+-    uint32_t value = (int32_t)read1(h) << 24;
++    uint32_t value = (uint32_t)read1(h) << 24;
+     value |= (uint32_t)read1(h) << 16;
+     value |= (uint32_t)read1(h) << 8;
+     value |= (uint32_t)read1(h);

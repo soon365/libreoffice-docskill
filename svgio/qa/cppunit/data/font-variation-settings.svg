@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg">
+  <g font-family="Reem Kufi">
+    <text y="1em" style="font-variation-settings: 'wght' 400">Hello</text>
+    <text y="2em" style="font-variation-settings: 'wght' 450">Hello</text>
+    <text y="3em" style="font-variation-settings: 'wght' 500">Hello</text>
+    <text y="4em" style="font-variation-settings: 'wght' 550">Hello</text>
+    <text y="5em" style="font-variation-settings: 'wght' 600">Hello</text>
+    <text y="6em" style="font-variation-settings: 'wght' 650">Hello</text>
+    <text y="7em" style="font-variation-settings: 'wght' 700">Hello</text>
+  </g>
+</svg>

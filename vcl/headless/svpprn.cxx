@@ -1,0 +1,209 @@
+/* -*- Mode: C++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
+/*
+ * This file is part of the LibreOffice project.
+ *
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ *
+ * This file incorporates work covered by the following license notice:
+ *
+ *   Licensed to the Apache Software Foundation (ASF) under one or more
+ *   contributor license agreements. See the NOTICE file distributed
+ *   with this work for additional information regarding copyright
+ *   ownership. The ASF licenses this file to you under the Apache
+ *   License, Version 2.0 (the "License"); you may not use this file
+ *   except in compliance with the License. You may obtain a copy of
+ *   the License at http://www.apache.org/licenses/LICENSE-2.0 .
+ */
+
+#include <sal/config.h>
+
+#include <string_view>
+
+#include <vcl/svapp.hxx>
+#include <printerinfomanager.hxx>
+
+#include <jobset.h>
+#include <print.h>
+
+#include <unx/genpspgraphics.h>
+
+#include <headless/svpprn.hxx>
+#include <headless/svpinst.hxx>
+
+using namespace psp;
+
+static void copyJobDataToJobSetup( ImplJobSetup* pJobSetup, JobData& rData )
+{
+    pJobSetup->SetOrientation( rData.m_eOrientation == orientation::Landscape ? Orientation::Landscape : Orientation::Portrait );
+
+    // copy page size
+    OUString aPaper;
+    int width, height;
+
+    rData.m_aContext.getPageSize( aPaper, width, height );
+    pJobSetup->SetPaperFormat( PaperInfo::fromPSName(OUStringToOString( aPaper, RTL_TEXTENCODING_ISO_8859_1 )) );
+    pJobSetup->SetPaperWidth( 0 );
+    pJobSetup->SetPaperHeight( 0 );
+    if( pJobSetup->GetPaperFormat() == PAPER_USER )
+    {
+        // convert from points to 1/100 mm
+        width = o3tl::convert(width, o3tl::Length::pt, o3tl::Length::mm100);
+        height = o3tl::convert(height, o3tl::Length::pt, o3tl::Length::mm100);
+
+        if( rData.m_eOrientation == psp::orientation::Portrait )
+        {
+            pJobSetup->SetPaperWidth( width );
+            pJobSetup->SetPaperHeight( height );
+        }
+        else
+        {
+            pJobSetup->SetPaperWidth( height );
+            pJobSetup->SetPaperHeight( width );
+        }
+    }
+
+    // copy input slot
+    const PPDKey* pKey = nullptr;
+    const PPDValue* pValue = nullptr;
+
+    pJobSetup->SetPaperBin( 0xffff );
+    if( rData.m_pParser )
+        pKey                    = rData.m_pParser->getKey( u"InputSlot"_ustr );
+    if( pKey )
+        pValue                  = rData.m_aContext.getValue( pKey );
+    if( pKey && pValue )
+    {
+        int nPaperBin;
+        for( nPaperBin = 0;
+             pValue != pKey->getValue( nPaperBin ) &&
+                 nPaperBin < pKey->countValues();
+             nPaperBin++ );
+        pJobSetup->SetPaperBin(
+            (nPaperBin == pKey->countValues()
+             || pValue == pKey->getDefaultValue())
+            ? 0xffff : nPaperBin);
+    }
+
+    // copy duplex
+    pKey = nullptr;
+    pValue = nullptr;
+
+    pJobSetup->SetDuplexMode( DuplexMode::Unknown );
+    if( rData.m_pParser )
+        pKey = rData.m_pParser->getKey( u"Duplex"_ustr );
+    if( pKey )
+        pValue = rData.m_aContext.getValue( pKey );
+    if( pKey && pValue )
+    {
+        if( pValue->m_aOption.equalsIgnoreAsciiCase( "None" ) ||
+            pValue->m_aOption.startsWithIgnoreAsciiCase( "Simplex" )
+           )
+        {
+            pJobSetup->SetDuplexMode( DuplexMode::Off );
+        }
+        else if( pValue->m_aOption.equalsIgnoreAsciiCase( "DuplexNoTumble" ) )
+        {
+            pJobSetup->SetDuplexMode( DuplexMode::LongEdge );
+        }
+        else if( pValue->m_aOption.equalsIgnoreAsciiCase( "DuplexTumble" ) )
+        {
+            pJobSetup->SetDuplexMode( DuplexMode::ShortEdge );
+        }
+    }
+
+    // copy the whole context
+
+    sal_uInt32 nBytes;
+    std::unique_ptr<sal_uInt8[]> pBuffer;
+    if( rData.getStreamBuffer( pBuffer, nBytes ) )
+        pJobSetup->SetDriverData( std::move(pBuffer), nBytes );
+    else
+        pJobSetup->SetDriverData( nullptr, 0 );
+}
+
+// SalInstance
+
+SalInfoPrinter* SvpSalInstance::CreateInfoPrinter(SalPrinterQueueInfo& rQueueInfo,
+                                                  ImplJobSetup& rJobSetup)
+{
+    // create and initialize SalInfoPrinter
+    SvpSalInfoPrinter* pPrinter = new SvpSalInfoPrinter;
+
+    PrinterInfoManager& rManager(PrinterInfoManager::get());
+    PrinterInfo aInfo(rManager.getPrinterInfo(rQueueInfo.maPrinterName));
+    pPrinter->m_aJobData = aInfo;
+
+    if (rJobSetup.GetDriverData())
+        JobData::constructFromStreamBuffer(rJobSetup.GetDriverData(), rJobSetup.GetDriverDataLen(),
+                                           aInfo);
+
+    rJobSetup.SetSystem(JOBSETUP_SYSTEM_UNIX);
+    rJobSetup.SetPrinterName(rQueueInfo.maPrinterName);
+    rJobSetup.SetDriver(aInfo.m_aDriverName);
+    copyJobDataToJobSetup(&rJobSetup, aInfo);
+
+    return pPrinter;
+}
+
+std::unique_ptr<SalPrinter> SvpSalInstance::CreatePrinter( SalInfoPrinter* pInfoPrinter )
+{
+    // create and initialize SalPrinter
+    SvpSalPrinter* pPrinter = new SvpSalPrinter( pInfoPrinter );
+    pPrinter->m_aJobData = static_cast<SvpSalInfoPrinter*>(pInfoPrinter)->m_aJobData;
+
+    return std::unique_ptr<SalPrinter>(pPrinter);
+}
+
+void SvpSalInstance::GetPrinterQueueInfo(ImplPrnQueueList& rList)
+{
+    PrinterInfoManager& rManager( PrinterInfoManager::get() );
+    static const char* pNoSyncDetection = getenv( "SAL_DISABLE_SYNCHRONOUS_PRINTER_DETECTION" );
+    if( ! pNoSyncDetection || ! *pNoSyncDetection )
+    {
+        // #i62663# synchronize possible asynchronouse printer detection now
+        rManager.checkPrintersChanged( true );
+    }
+
+    for (const auto& [rPrinterName, rInfo] : rManager.getPrinters())
+    {
+        // create new entry
+        std::unique_ptr<SalPrinterQueueInfo> pInfo(new SalPrinterQueueInfo);
+        pInfo->maPrinterName = rPrinterName;
+        pInfo->maDriver         = rInfo.m_aDriverName;
+        pInfo->maLocation       = rInfo.m_aLocation;
+        pInfo->maComment        = rInfo.m_aComment;
+
+        OUString sPdfDir;
+        if (getPdfDir(rInfo, sPdfDir))
+            pInfo->maLocation = sPdfDir;
+
+        rList.Add(std::move(pInfo));
+    }
+}
+
+OUString SvpSalInstance::GetDefaultPrinter()
+{
+    PrinterInfoManager& rManager( PrinterInfoManager::get() );
+    return rManager.getDefaultPrinter();
+}
+
+void SvpSalInstance::PostPrintersChanged()
+{
+    SvpSalInstance *pInst = SvpSalInstance::s_pDefaultInstance;
+    for (auto pSalFrame : pInst->getFrames() )
+        pInst->PostEvent( pSalFrame, nullptr, SalEvent::PrinterChanged );
+}
+
+bool SvpSalInfoPrinter::Setup( weld::Window&, ImplJobSetup&)
+{
+    return false;
+}
+
+SvpSalPrinter::SvpSalPrinter( SalInfoPrinter* pInfoPrinter )
+    : PspSalPrinter( pInfoPrinter )
+{
+}
+
+/* vim:set shiftwidth=4 softtabstop=4 expandtab: */

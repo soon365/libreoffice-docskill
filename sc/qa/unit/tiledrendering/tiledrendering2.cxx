@@ -1,0 +1,323 @@
+/* -*- Mode: C++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
+/*
+ * This file is part of the LibreOffice project.
+ *
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ */
+
+#include <sctiledrenderingtest.hxx>
+
+#include <com/sun/star/datatransfer/XTransferable2.hpp>
+#include <com/sun/star/document/UpdateDocMode.hpp>
+
+#include <comphelper/propertyvalue.hxx>
+#include <comphelper/propertysequence.hxx>
+#include <sfx2/lokhelper.hxx>
+#include <vcl/BitmapReadAccess.hxx>
+#include <vcl/scheduler.hxx>
+#include <LibreOfficeKit/LibreOfficeKitEnums.h>
+
+#include <sctestviewcallback.hxx>
+#include <docuno.hxx>
+#include <scmod.hxx>
+#include <tabvwsh.hxx>
+#include <postit.hxx>
+
+using namespace com::sun::star;
+
+CPPUNIT_TEST_FIXTURE(ScTiledRenderingTest, testSidebarLocale)
+{
+    ScModelObj* pModelObj = createDoc("chart.ods");
+    int nView1 = SfxLokHelper::getCurrentView();
+    ScTestViewCallback aView1;
+    SfxViewShell* pView1 = SfxViewShell::Current();
+    pView1->SetLOKLocale(u"en-US"_ustr);
+    SfxLokHelper::createView();
+    ScTestViewCallback aView2;
+    SfxViewShell* pView2 = SfxViewShell::Current();
+    pView2->SetLOKLocale(u"de-DE"_ustr);
+    TestLokCallbackWrapper::InitializeSidebar();
+    Scheduler::ProcessEventsToIdle();
+    aView2.m_aStateChanges.clear();
+
+    pModelObj->postMouseEvent(LOK_MOUSEEVENT_MOUSEBUTTONDOWN, /*x=*/1, /*y=*/1, /*count=*/2,
+                              /*buttons=*/1, /*modifier=*/0);
+    pModelObj->postMouseEvent(LOK_MOUSEEVENT_MOUSEBUTTONUP, /*x=*/1, /*y=*/1, /*count=*/2,
+                              /*buttons=*/1, /*modifier=*/0);
+    SfxLokHelper::setView(nView1);
+    Scheduler::ProcessEventsToIdle();
+
+    auto it = aView2.m_aStateChanges.find(".uno:Sidebar");
+    CPPUNIT_ASSERT(it != aView2.m_aStateChanges.end());
+    std::string aLocale = it->second.get<std::string>("locale");
+    CPPUNIT_ASSERT_EQUAL(std::string("de-DE"), aLocale);
+}
+
+CPPUNIT_TEST_FIXTURE(ScTiledRenderingTest, testCopyMultiSelection)
+{
+    // Given a document with A1 and A3 as selected cells:
+    ScModelObj* pModelObj = createDoc("multi-selection.ods");
+    ScTestViewCallback aView1;
+    // Get the center of A3:
+    uno::Sequence<beans::PropertyValue> aPropertyValues = {
+        comphelper::makePropertyValue(u"ToPoint"_ustr, u"$A$3"_ustr),
+    };
+    dispatchCommand(mxComponent, u".uno:GoToCell"_ustr, aPropertyValues);
+    Point aPoint = aView1.m_aCellCursorBounds.Center();
+    // Go to A1:
+    aPropertyValues = {
+        comphelper::makePropertyValue(u"ToPoint"_ustr, u"$A$1"_ustr),
+    };
+    dispatchCommand(mxComponent, u".uno:GoToCell"_ustr, aPropertyValues);
+    // Ctrl-click on A3:
+    int nCtrl = KEY_MOD1;
+    pModelObj->postMouseEvent(LOK_MOUSEEVENT_MOUSEBUTTONDOWN, aPoint.getX(), aPoint.getY(), 1,
+                              MOUSE_LEFT, nCtrl);
+
+    // When getting the selection:
+    uno::Reference<datatransfer::XTransferable> xTransferable = pModelObj->getSelection();
+
+    // Make sure we get A1+A3 instead of an error:
+    CPPUNIT_ASSERT(xTransferable.is());
+
+    // Also make sure that just 2 cells is classified as a simple selection:
+    uno::Reference<datatransfer::XTransferable2> xTransferable2(xTransferable, uno::UNO_QUERY);
+    CPPUNIT_ASSERT(xTransferable2.is());
+    // Without the fix, the text selection was complex.
+    CPPUNIT_ASSERT(!xTransferable2->isComplex());
+}
+
+CPPUNIT_TEST_FIXTURE(ScTiledRenderingTest, testCursorJumpOnFailedSearch)
+{
+    createDoc("empty.ods");
+    ScTestViewCallback aView;
+
+    // Go to lower cell
+    uno::Sequence<beans::PropertyValue> aPropertyValues = {
+        comphelper::makePropertyValue(u"ToPoint"_ustr, u"$C$3"_ustr),
+    };
+    dispatchCommand(mxComponent, u".uno:GoToCell"_ustr, aPropertyValues);
+
+    tools::Rectangle aInitialCursor = aView.m_aCellCursorBounds;
+
+    // Search for a non-existing string using the start point parameters
+    aPropertyValues = comphelper::InitPropertySequence(
+        { { "SearchItem.SearchString", uno::Any(u"No-existing"_ustr) },
+          { "SearchItem.Backward", uno::Any(false) },
+          { "SearchItem.SearchStartPointX", uno::Any(static_cast<sal_Int32>(100)) },
+          { "SearchItem.SearchStartPointY", uno::Any(static_cast<sal_Int32>(100)) } });
+    dispatchCommand(mxComponent, u".uno:ExecuteSearch"_ustr, aPropertyValues);
+
+    tools::Rectangle aFinalCursor = aView.m_aCellCursorBounds;
+
+    // Without the fix, the cursor jumps even when no match is found
+    CPPUNIT_ASSERT_EQUAL(aInitialCursor, aFinalCursor);
+}
+
+CPPUNIT_TEST_FIXTURE(ScTiledRenderingTest, testLocaleFormulaSeparator)
+{
+    ScModelObj* pModelObj = createDoc("empty.ods");
+    ScTabViewShell* pView = dynamic_cast<ScTabViewShell*>(SfxViewShell::Current());
+    ScDocument* pDoc = pModelObj->GetDocument();
+
+    ScAddress addr(2, 0, 0);
+    typeCharsInCell("=subtotal(9,A1:A8", addr.Col(), addr.Row(), pView, pModelObj, false, true);
+    // Without the fix it would fail with
+    // - Expected: 0
+    // - Actual  : Err:508
+    CPPUNIT_ASSERT_EQUAL(u"0"_ustr, pDoc->GetString(addr));
+}
+
+CPPUNIT_TEST_FIXTURE(ScTiledRenderingTest, testCool11739LocaleDialogFieldUnit)
+{
+    createDoc("empty.ods");
+    SfxViewShell* pView1 = SfxViewShell::Current();
+    pView1->SetLOKLocale(u"fr-FR"_ustr);
+
+    ScModule* pMod = ScModule::get();
+    FieldUnit eMetric = pMod->GetMetric();
+
+    // Without the fix, it fails with
+    // - Expected: 2
+    // - Actual  : 8
+    // where 2 is FieldUnit::CM and 8 is FieldUnit::INCH
+    CPPUNIT_ASSERT_EQUAL(FieldUnit::CM, eMetric);
+}
+
+CPPUNIT_TEST_FIXTURE(ScTiledRenderingTest, testSplitPanes)
+{
+    createDoc("split-panes.ods");
+
+    save(TestFilter::ODS);
+
+    xmlDocUniquePtr pSettings = parseExport(u"settings.xml"_ustr);
+    CPPUNIT_ASSERT(pSettings);
+
+    // Without the fix in place, this test would have failed with
+    // - Expected: 0
+    // - Actual  : 2
+    assertXPathContent(pSettings,
+                       "/office:document-settings/office:settings/config:config-item-set[1]/"
+                       "config:config-item-map-indexed/config:config-item-map-entry/"
+                       "config:config-item-map-named/config:config-item-map-entry/"
+                       "config:config-item[@config:name='VerticalSplitMode']",
+                       u"0");
+}
+
+CPPUNIT_TEST_FIXTURE(ScTiledRenderingTest, testSplitPanesXLSX)
+{
+    createDoc("split-panes.xlsx");
+
+    save(TestFilter::XLSX);
+
+    xmlDocUniquePtr pSheet = parseExport(u"xl/worksheets/sheet1.xml"_ustr);
+    CPPUNIT_ASSERT(pSheet);
+
+    // Without the fix in place, this test would have failed with
+    // - Expected: topRight
+    // - Actual  : bottomRight
+    // which also results in invalid XLSX
+    assertXPath(pSheet, "/x:worksheet/x:sheetViews/x:sheetView/x:pane", "activePane", u"topRight");
+}
+
+CPPUNIT_TEST_FIXTURE(ScTiledRenderingTest, testTdf167042)
+{
+    ScModelObj* pModelObj = createDoc("tdf167042.ods");
+    ScDocument* pDoc = pModelObj->GetDocument();
+    ScTestViewCallback aView1;
+
+    uno::Sequence<beans::PropertyValue> aPropertyValues
+        = { comphelper::makePropertyValue("ToPoint", OUString("$A$1")) };
+    dispatchCommand(mxComponent, ".uno:GoToCell", aPropertyValues);
+
+    Point aPoint = aView1.m_aCellCursorBounds.Center();
+
+    aPropertyValues = { comphelper::makePropertyValue("ToPoint", OUString("$B$1")) };
+    dispatchCommand(mxComponent, ".uno:GoToCell", aPropertyValues);
+
+    // Check that we have the comment on A1
+    CPPUNIT_ASSERT_MESSAGE("There should be a note on A1", pDoc->HasNote(ScAddress(0, 0, 0)));
+    ScPostIt* pNote = pDoc->GetNote(ScAddress(0, 0, 0));
+    CPPUNIT_ASSERT(pNote);
+    CPPUNIT_ASSERT_EQUAL(u"test1"_ustr, pNote->GetText());
+
+    uno::Sequence aArgs{ comphelper::makePropertyValue(u"PersistentCopy"_ustr, false) };
+    dispatchCommand(mxComponent, u".uno:FormatPaintbrush"_ustr, aArgs);
+
+    pModelObj->postMouseEvent(LOK_MOUSEEVENT_MOUSEBUTTONDOWN, aPoint.getX(), aPoint.getY(), 1,
+                              MOUSE_LEFT, 0);
+    pModelObj->postMouseEvent(LOK_MOUSEEVENT_MOUSEBUTTONUP, aPoint.getX(), aPoint.getY(), 1,
+                              MOUSE_LEFT, 0);
+
+    // Check that FormatPaintbrush worked
+    vcl::Font aFont;
+    pDoc->GetPattern(0, 0, 0)->fillFontOnly(aFont);
+    CPPUNIT_ASSERT_EQUAL_MESSAGE("font should be bold A1", WEIGHT_BOLD,
+                                 aFont.GetWeightMaybeAskConfig());
+
+    // Check that we still have the comment on A1 after FormatPaintbrush
+    pNote = pDoc->GetNote(ScAddress(0, 0, 0));
+    CPPUNIT_ASSERT(pNote);
+    CPPUNIT_ASSERT_EQUAL(u"test1"_ustr, pNote->GetText());
+
+    dispatchCommand(mxComponent, u".uno:Undo"_ustr, {});
+
+    // Check that we still have the comment on A1 after Undo
+    pNote = pDoc->GetNote(ScAddress(0, 0, 0));
+    CPPUNIT_ASSERT(pNote);
+    // Without the fix in place, this test would have failed with
+    // - Expected : test1
+    // - Actual :
+    CPPUNIT_ASSERT_EQUAL(u"test1"_ustr, pNote->GetText());
+}
+
+CPPUNIT_TEST_FIXTURE(ScTiledRenderingTest, testBreakPageView)
+{
+    // Give a file in page break view mode
+    ScModelObj* pModelObj = createDoc("page-view.xlsx");
+
+    // Paint a tile not at the top or left
+    size_t nCanvasSize = 1024;
+    size_t nTileSize = 256;
+    std::vector<unsigned char> aPixmap(nCanvasSize * nCanvasSize * 4, 0);
+    ScopedVclPtrInstance<VirtualDevice> xDevice(DeviceFormat::WITHOUT_ALPHA);
+    xDevice->SetBackground(Wallpaper(COL_TRANSPARENT));
+    xDevice->SetOutputSizePixelScaleOffsetAndLOKBuffer(Size(nCanvasSize, nCanvasSize), 1.0, Point(),
+                                                       aPixmap.data());
+    pModelObj->paintTile(*xDevice, nCanvasSize, nCanvasSize, 3840, 3840, 3840, 3840);
+    xDevice->EnableMapMode(false);
+    Bitmap aBitmap = xDevice->GetBitmap(Point(0, 0), Size(nTileSize, nTileSize));
+
+    // Top left pixel should be white, not blue
+    BitmapScopedReadAccess pAccess(aBitmap);
+    Color aColor(pAccess->GetPixel(0, 0));
+    // Without the fix in place, this test fails with
+    // - Expected: rgba[ffffffff]
+    // - Actual  : rgba[000080ff]
+    CPPUNIT_ASSERT_EQUAL(Color(255, 255, 255), aColor);
+}
+
+CPPUNIT_TEST_FIXTURE(ScTiledRenderingTest, testPageBackgroundRemoteNotFetched)
+{
+    // Page background image with a remote URL must not fetch
+    // the URL during paint when link updates are not allowed.
+    uno::Sequence<beans::PropertyValue> aParams = {
+        comphelper::makePropertyValue(u"UpdateDocMode"_ustr,
+                                      sal_Int16(css::document::UpdateDocMode::NO_UPDATE)),
+    };
+    loadFromFile(u"page-background-link.fods", aParams);
+    ScModelObj* pModelObj = comphelper::getFromUnoTunnel<ScModelObj>(mxComponent);
+    CPPUNIT_ASSERT(pModelObj);
+    pModelObj->initializeForTiledRendering({});
+
+    ScopedVclPtrInstance<VirtualDevice> pDevice(DeviceFormat::WITHOUT_ALPHA);
+    pDevice->SetOutputSizePixel(Size(1024, 768));
+    pModelObj->paintTile(*pDevice, 1024, 768, 0, 0, 15360, 7680);
+}
+
+CPPUNIT_TEST_FIXTURE(ScTiledRenderingTest, testShapeBackgroundRemoteNotFetched)
+{
+    // Shape fill bitmap with a remote URL must not fetch
+    // the URL during paint when link updates are not allowed.
+    // The assert in createNewSdrFillGraphicAttribute will fire if
+    // a remote fetch is attempted.
+    uno::Sequence<beans::PropertyValue> aParams = {
+        comphelper::makePropertyValue(u"UpdateDocMode"_ustr,
+                                      sal_Int16(css::document::UpdateDocMode::NO_UPDATE)),
+    };
+    loadFromFile(u"shape-background-link.fods", aParams);
+    ScModelObj* pModelObj = comphelper::getFromUnoTunnel<ScModelObj>(mxComponent);
+    CPPUNIT_ASSERT(pModelObj);
+    pModelObj->initializeForTiledRendering({});
+
+    ScopedVclPtrInstance<VirtualDevice> pDevice(DeviceFormat::WITHOUT_ALPHA);
+    pDevice->SetOutputSizePixel(Size(1024, 768));
+    pModelObj->paintTile(*pDevice, 1024, 768, 0, 0, 15360, 7680);
+}
+
+CPPUNIT_TEST_FIXTURE(ScTiledRenderingTest, testBulletImageRemoteNotFetched)
+{
+    // text:list-level-style-image with a remote URL must not fetch
+    // the URL during paint when link updates are not allowed.
+    // Currently the editeng rendering path silently skips unresolved
+    // GraphicExternalLink graphics. If someone adds fetching here,
+    // this test should catch it.
+    uno::Sequence<beans::PropertyValue> aParams = {
+        comphelper::makePropertyValue(u"UpdateDocMode"_ustr,
+                                      sal_Int16(css::document::UpdateDocMode::NO_UPDATE)),
+    };
+    loadFromFile(u"bullet-image-link.fods", aParams);
+    ScModelObj* pModelObj = comphelper::getFromUnoTunnel<ScModelObj>(mxComponent);
+    CPPUNIT_ASSERT(pModelObj);
+    pModelObj->initializeForTiledRendering({});
+
+    ScopedVclPtrInstance<VirtualDevice> pDevice(DeviceFormat::WITHOUT_ALPHA);
+    pDevice->SetOutputSizePixel(Size(1024, 768));
+    pModelObj->paintTile(*pDevice, 1024, 768, 0, 0, 15360, 7680);
+}
+
+CPPUNIT_PLUGIN_IMPLEMENT();
+
+/* vim:set shiftwidth=4 softtabstop=4 expandtab: */

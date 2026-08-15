@@ -1,0 +1,261 @@
+/* -*- Mode: C++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4; fill-column: 100 -*- */
+/*
+ * This file is part of the LibreOffice project.
+ *
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ *
+ * This file incorporates work covered by the following license notice:
+ *
+ *   Licensed to the Apache Software Foundation (ASF) under one or more
+ *   contributor license agreements. See the NOTICE file distributed
+ *   with this work for additional information regarding copyright
+ *   ownership. The ASF licenses this file to you under the Apache
+ *   License, Version 2.0 (the "License"); you may not use this file
+ *   except in compliance with the License. You may obtain a copy of
+ *   the License at http://www.apache.org/licenses/LICENSE-2.0 .
+ */
+
+#pragma once
+
+#include <sal/config.h>
+#include <config_emscripten.h>
+#include <config_vclplug.h>
+
+#include "QtFilePicker.hxx"
+
+#include <salinst.hxx>
+#include <salusereventlist.hxx>
+#include <vclpluginapi.h>
+#ifdef _WIN32
+#include <win/WindowsInstance.hxx>
+#else
+#include <unx/geninst.h>
+#endif
+
+#include <osl/conditn.hxx>
+#include <vcl/timer.hxx>
+#include <vcl/weld/ColorChooserDialog.hxx>
+
+SAL_WNODEPRECATED_DECLARATIONS_PUSH
+#include <QtCore/QObject>
+SAL_WNODEPRECATED_DECLARATIONS_POP
+
+#include <concepts>
+#include <cstdlib>
+#include <functional>
+#include <memory>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+class QtClipboard;
+class QtFrame;
+class QtTimer;
+
+class QApplication;
+class SalYieldMutex;
+class SalFrame;
+
+#if defined __EMSCRIPTEN__ && ENABLE_QT6 && HAVE_EMSCRIPTEN_JSPI                                   \
+    && !HAVE_EMSCRIPTEN_PROXY_TO_PTHREAD
+namespace comphelper::emscriptenthreading
+{
+struct Data;
+}
+#endif
+
+struct StdFreeCStr
+{
+    void operator()(char* arg) const noexcept { std::free(arg); }
+};
+using FreeableCStr = std::unique_ptr<char[], StdFreeCStr>;
+
+/** Abstract base class for Qt based SalInstance implementations.
+ *  Subclasses need to implement the purely virtual graphics-related
+ *  methods using a specific graphics backend.
+ */
+class VCLPLUG_QT_PUBLIC QtInstance : public QObject,
+// avoid moc failing due to not evaluating all macros
+#ifndef Q_MOC_RUN
+#ifdef _WIN32
+                                     public WindowsInstance,
+#else
+                                     public SalGenericInstance,
+#endif
+#endif
+                                     public SalUserEventList
+{
+    Q_OBJECT
+
+    osl::Condition m_aWaitingYieldCond;
+    QtTimer* m_pTimer;
+    bool m_bSleeping;
+    std::unordered_map<ClipboardSelectionType, rtl::Reference<QtClipboard>> m_aClipboards;
+
+    std::unique_ptr<QApplication> m_pQApplication;
+    std::vector<FreeableCStr> m_pFakeArgvFreeable;
+    std::unique_ptr<char* []> m_pFakeArgv;
+    int m_nFakeArgc;
+
+    Timer m_aUpdateStyleTimer;
+    bool m_bUpdateFonts;
+
+    QtFrame* m_pActivePopup;
+
+#if defined __EMSCRIPTEN__ && ENABLE_QT6 && HAVE_EMSCRIPTEN_JSPI                                   \
+    && !HAVE_EMSCRIPTEN_PROXY_TO_PTHREAD
+    comphelper::emscriptenthreading::Data* m_emscriptenThreadingData;
+#endif
+
+    DECL_DLLPRIVATE_LINK(updateStyleHdl, Timer*, void);
+    void AfterAppInit() override;
+    void EmscriptenLightweightRunInMainThread_(std::function<void()> func);
+
+private Q_SLOTS:
+    bool ImplYield(bool bWait, bool bHandleAllCurrentEvents);
+    static void deleteObjectLater(QObject* pObject);
+    static void localeChanged();
+    void colorSchemeChanged();
+
+    void orientationChanged(Qt::ScreenOrientation);
+    void primaryScreenChanged(QScreen*);
+    void screenAdded(QScreen*);
+    void screenRemoved(QScreen*);
+    void virtualGeometryChanged(const QRect&);
+
+Q_SIGNALS:
+    bool ImplYieldSignal(bool bWait, bool bHandleAllCurrentEvents);
+    void deleteObjectLaterSignal(QObject* pObject);
+
+protected:
+    virtual rtl::Reference<QtFilePicker>
+    createPicker(css::uno::Reference<css::uno::XComponentContext> const& context,
+                 QFileDialog::FileMode);
+    void connectQScreenSignals(const QScreen*);
+    virtual OUString getToolkitId() const;
+    void notifyDisplayChanged();
+
+    virtual QtFrame* DoCreateFrame(SalFrameStyleFlags nStyle, QtFrame* pParent) = 0;
+    virtual OUString getRenderingBackendName() const = 0;
+
+public:
+    explicit QtInstance();
+    virtual ~QtInstance() override;
+
+    void RunInMainThread(std::function<void()> func);
+    template <typename F>
+    requires std::invocable<F> std::invoke_result_t<F>
+    EmscriptenLightweightRunInMainThread(F&& func)
+    {
+        if constexpr (std::is_same_v<std::invoke_result_t<F>, void>)
+        {
+            EmscriptenLightweightRunInMainThread_(std::move(func));
+        }
+        else
+        {
+            std::invoke_result_t<F> ret;
+            EmscriptenLightweightRunInMainThread_(
+                [&func, &ret] { ret = std::forward<std::invoke_result_t<F>>(func()); });
+            return ret;
+        }
+    }
+
+    virtual SalFrame* CreateFrame(SalFrame* pParent, SalFrameStyleFlags nStyle) override;
+    virtual SalFrame* CreateChildFrame(SystemParentData* pParent,
+                                       SalFrameStyleFlags nStyle) override;
+    virtual void DestroyFrame(SalFrame* pFrame) override;
+
+    virtual SalObject* CreateObject(SalFrame* pParent, SystemWindowData* pWindowData,
+                                    bool bShow) override;
+    virtual void DestroyObject(SalObject* pObject) override;
+
+    virtual std::unique_ptr<SalMenu> CreateMenu(bool, Menu*) override;
+    virtual std::unique_ptr<SalMenuItem> CreateMenuItem(const SalItemParams&) override;
+
+    virtual SalTimer* CreateSalTimer() override;
+    virtual SalSystem* CreateSalSystem() override;
+
+    virtual bool DoYield(bool bWait, bool bHandleAllCurrentEvents) override;
+    virtual bool AnyInput(VclInputFlags nType) override;
+
+    std::unique_ptr<weld::Builder> CreateBuilder(weld::Widget* pParent, const OUString& rUIRoot,
+                                                 const OUString& rUIFile) override;
+    virtual std::unique_ptr<weld::Builder> CreateInterimBuilder(vcl::Window* pParent,
+                                                                const OUString& rUIRoot,
+                                                                const OUString& rUIFile,
+                                                                bool bAllowCycleFocusOut) override;
+    virtual weld::MessageDialog* CreateMessageDialog(weld::Widget* pParent,
+                                                     VclMessageType eMessageType,
+                                                     VclButtonsType eButtonType,
+                                                     const OUString& rPrimaryMessage) override;
+    virtual std::unique_ptr<weld::ColorChooserDialog>
+    CreateColorChooserDialog(weld::Window* pParent, vcl::ColorPickerMode eMode) override;
+
+// so we fall back to the default abort, instead of duplicating it...
+#ifndef __EMSCRIPTEN__
+    virtual OpenGLContext* CreateOpenGLContext() override;
+#endif
+
+    virtual void AddToRecentDocumentList(const OUString& rFileUrl, const OUString& rMimeType,
+                                         const OUString& rDocumentService) override;
+
+    virtual bool IsMainThread() const override;
+
+    virtual void TriggerUserEventProcessing() override;
+    virtual void ProcessEvent(SalUserEvent aEvent) override;
+
+    bool hasNativeColorChooserDialog() const override { return true; }
+    bool hasNativeFileSelection() const override { return true; }
+    css::uno::Reference<css::ui::dialogs::XFilePicker2>
+    createFilePicker(const css::uno::Reference<css::uno::XComponentContext>&) override;
+    css::uno::Reference<css::ui::dialogs::XFolderPicker2>
+    createFolderPicker(const css::uno::Reference<css::uno::XComponentContext>&) override;
+
+    virtual css::uno::Reference<css::datatransfer::clipboard::XClipboard>
+    CreateClipboard(ClipboardSelectionType eSelection) override;
+    virtual css::uno::Reference<css::datatransfer::dnd::XDragSource>
+    ImplCreateDragSource(const SystemEnvData& rSysEnv) override;
+    virtual css::uno::Reference<css::datatransfer::dnd::XDropTarget>
+    ImplCreateDropTarget(const SystemEnvData& rSysEnv) override;
+
+    virtual Platform GetPlatform() const override;
+    virtual Toolkit GetToolkit() const override;
+    virtual OUString GetToolkitName() const override;
+
+#if QT_VERSION < QT_VERSION_CHECK(6, 12, 0)
+    // Helper to implement QtFrame::GetUseReducedAnimation for Qt < 6.12
+    // KFSalInstance overrides this to read Plasma settings
+    virtual bool GetUseReducedAnimation() { return false; }
+#endif
+    void UpdateStyle(bool bFontsChanged);
+
+    void* CreateGStreamerSink(const SystemChildWindow*) override;
+
+    bool DoExecute(int& nExitCode) override;
+    void DoQuit() override;
+
+    static QWidget* GetQWidget(weld::Widget* pWidget);
+
+    QtFrame* activePopup() const { return m_pActivePopup; }
+    void setActivePopup(QtFrame*);
+
+    static bool useCairo();
+    static bool noNativeControls();
+    static bool noWeldedWidgets();
+    static bool isQtWeldingEnabled();
+
+private:
+    QtFrame* CreateFrame(SalFrameStyleFlags nStyle, QtFrame* pParent);
+    std::unique_ptr<QApplication> CreateQApplication();
+};
+
+inline QtInstance& GetQtInstance()
+{
+    QtInstance* pInstance = static_cast<QtInstance*>(GetSalInstance());
+    assert(pInstance);
+    return *pInstance;
+}
+
+/* vim:set shiftwidth=4 softtabstop=4 expandtab cinoptions=b1,g0,N-s cinkeys+=0=break: */

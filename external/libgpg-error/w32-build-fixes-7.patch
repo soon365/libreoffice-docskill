@@ -1,0 +1,17 @@
+--- src/logging.c	2023-03-21 18:33:56.000000000 +0900
++++ src/logging.c~	2026-06-29 13:20:00.000000000 +0800
+@@ -1284,12 +1284,12 @@
+       for (p = buffer; length--; p++)
+         {
+           _gpgrt_log_printf ("%02x", *p);
+           if (wrap && ++cnt == 32 && length)
+             {
+               if (trunc)
+                 {
+-                  _gpgrt_log_printf (" …");
++                  _gpgrt_log_printf (" ...");
+                   break;
+                 }
+
+               cnt = 0;
+

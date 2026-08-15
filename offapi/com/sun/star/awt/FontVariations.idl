@@ -1,0 +1,28 @@
+/* -*- Mode: C++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
+/*
+ * This file is part of the LibreOffice project.
+ *
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ */
+
+
+module com {  module sun {  module star {  module awt {
+
+
+/** provides access to OpenType variation axis information for
+    installed font families.
+
+    <p>Intended for use by scripts and extensions that build a UI to
+    edit
+    com::sun::star::style::CharacterProperties::CharFontVariations.</p>
+
+    @since LibreOffice 25.8
+ */
+service FontVariations: XFontVariations;
+
+
+}; }; }; };
+
+/* vim:set shiftwidth=4 softtabstop=4 expandtab: */

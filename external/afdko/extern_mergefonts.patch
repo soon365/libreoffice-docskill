@@ -1,0 +1,53 @@
+--- afdko/c/mergefonts/mergeFonts.cpp
++++ afdko/c/mergefonts/mergeFonts.cpp
+@@ -1384,3 +1384,50 @@
+ 
+     return 0;
+ }
++
++/* Embedding interface: the same wiring as main__mergefonts above, but with
++   heap allocation and caller-driven steps in place of argv parsing. */
++extern "C" txCtx mergeFontsNew(void) {
++    MergeInfo *mi = (MergeInfo *)calloc(1, sizeof(MergeInfo));
++    txExtCtx e = (txExtCtx)calloc(1, sizeof(struct txExtCtx_));
++    txCtx h = (txCtx)calloc(1, sizeof(struct txCtx_));
++
++    if (mi == NULL || e == NULL || h == NULL) {
++        free(mi);
++        free(e);
++        free(h);
++        return NULL;
++    }
++
++    e->extData = mi;
++    e->progname = "mergefonts";
++    e->version = MERGEFONTS_VERSION;
++    e->processOption = &mf_processOption;
++    e->usage = &mf_usage;
++    e->help = &mf_help;
++    e->cfr_ReadFontCB = &mf_cfr_ReadFontCB;
++
++    mi->tx = h;
++
++    txNew(h, e);
++
++    return h;
++}
++
++extern "C" void mergeFontsFree(txCtx h) {
++    txExtCtx e = h->ext;
++    void *mi = e->extData;
++
++    txFree(h);
++    free(mi);
++    free(e);
++    free(h);
++}
++
++extern "C" void mergeFontsReadCIDFontInfo(txCtx h, const char *filePath) {
++    readCIDFontInfo((MergeInfo *)h->ext->extData, filePath);
++}
++
++extern "C" int mergeFontsDoMergeFileSet(txCtx h, int argc, char *argv[], int i) {
++    return doMergeFileSet(h, argc, argv, i);
++}

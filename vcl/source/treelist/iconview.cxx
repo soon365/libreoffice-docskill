@@ -1,0 +1,287 @@
+/* -*- Mode: C++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
+/*
+ * This file is part of the LibreOffice project.
+ *
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ *
+ * This file incorporates work covered by the following license notice:
+ *
+ *   Licensed to the Apache Software Foundation (ASF) under one or more
+ *   contributor license agreements. See the NOTICE file distributed
+ *   with this work for additional information regarding copyright
+ *   ownership. The ASF licenses this file to you under the Apache
+ *   License, Version 2.0 (the "License"); you may not use this file
+ *   except in compliance with the License. You may obtain a copy of
+ *   the License at http://www.apache.org/licenses/LICENSE-2.0 .
+ */
+
+#include <vcl/filter/PngImageWriter.hxx>
+#include <vcl/toolkit/treelistentry.hxx>
+#include <vcl/toolkit/viewdataentry.hxx>
+#include <iconview.hxx>
+#include "iconviewimpl.hxx"
+#include <vcl/uitest/uiobject.hxx>
+#include <vcl/toolkit/svlbitm.hxx>
+#include <tools/stream.hxx>
+#include <vcl/cvtgrf.hxx>
+
+namespace
+{
+const int separatorHeight = 10;
+const int nSpacing = 5; // 5 pixels from top, from bottom, between icon and label
+}
+
+IconView::IconView(vcl::Window* pParent, WinBits nBits)
+    : SvTreeListBox(pParent, nBits)
+{
+    m_nColumnCount = 1;
+    mbCenterAndClipText = true;
+    SetEntryWidth(0);
+
+    m_pImpl.reset(new IconViewImpl(*this, *GetModel(), GetStyle()));
+}
+
+Size IconView::GetEntrySize(const SvTreeListEntry& entry) const
+{
+    if (entry.IsSeparator())
+        return { GetEntryWidth() * GetColumnCount(), separatorHeight };
+    return { GetEntryWidth(), GetEntryHeight() };
+}
+
+void IconView::SetFixedColumnCount(short nColumnCount)
+{
+    m_nFixedColumnCount = nColumnCount;
+    m_nColumnCount = nColumnCount;
+}
+
+void IconView::UpdateEntrySize(const SvTreeListEntry& rEntry)
+{
+    const SvLBoxContextBmp* pBitmapItem
+        = static_cast<const SvLBoxContextBmp*>(rEntry.GetFirstItem(SvLBoxItemType::ContextBmp));
+    const Size aImageSize = pBitmapItem ? pBitmapItem->GetBitmap1().GetSizePixel() : Size();
+    // provide some minimum width if text exists (will be ellipsized if it doesn't fit completely)
+    const tools::Long nMinTextWidth = rEntry.GetFirstItem(SvLBoxItemType::String) ? 100 : 0;
+
+    int spacing = nSpacing * 2;
+    const short nMinHeight = aImageSize.getHeight() + spacing;
+    const short nMinWidth = std::max(aImageSize.getWidth() + spacing, nMinTextWidth);
+
+    bool bChanged = false;
+    if (nMinWidth > GetEntryWidth())
+    {
+        SetEntryWidth(nMinWidth);
+        bChanged = true;
+    }
+    if (nMinHeight > GetEntryHeight())
+    {
+        SetEntryHeight(nMinHeight);
+        bChanged = true;
+    }
+
+    if (bChanged)
+        Resize();
+}
+
+bool IconView::HasSeparatorEntry() const
+{
+    for (sal_uInt32 i = 0; i < GetEntryCount(); i++)
+    {
+        SvTreeListEntry* pEntry = GetEntry(i);
+        if (pEntry && pEntry->IsSeparator())
+            return true;
+    }
+
+    return false;
+}
+
+void IconView::CalcEntryHeight(const SvTreeListEntry& rEntry)
+{
+    int nHeight = nSpacing * 2;
+    SvViewDataEntry& rViewData = GetViewDataEntry(rEntry);
+    const size_t nCount = rEntry.ItemCount();
+    bool bHasIcon = false;
+    for (size_t nCur = 0; nCur < nCount; ++nCur)
+    {
+        nHeight += SvLBoxItem::GetHeight(rViewData, nCur);
+
+        if (!bHasIcon && rEntry.GetItem(nCur).GetType() == SvLBoxItemType::ContextBmp)
+            bHasIcon = true;
+    }
+
+    if (bHasIcon && nCount > 1)
+        nHeight += nSpacing; // between icon and label
+
+    if (nHeight > m_nEntryHeight)
+    {
+        m_nEntryHeight = nHeight;
+        Control::SetFont(GetFont());
+        m_pImpl->SetEntryHeight();
+    }
+}
+
+void IconView::Resize()
+{
+    Size aBoxSize = Control::GetOutputSizePixel();
+
+    if (!aBoxSize.Width())
+        return;
+
+    if (m_nFixedColumnCount == -1)
+        m_nColumnCount = m_nEntryWidth ? aBoxSize.Width() / m_nEntryWidth : 1;
+
+    SvTreeListBox::Resize();
+}
+
+Size IconView::GetOptimalSize() const
+{
+    if (m_nFixedColumnCount != -1 && !HasSeparatorEntry())
+    {
+        // if a fixed amount of columns has been set and only icons (no separators) are used,
+        // calculate size needed for those
+        const short nRowCount = std::ceil(double(GetEntryCount()) / GetColumnCount());
+        Size aSize(GetColumnCount() * m_nEntryWidth, nRowCount * m_nEntryHeight);
+        if (m_pImpl->m_aVerSBar->IsVisible())
+            aSize.AdjustWidth(GetSettings().GetStyleSettings().GetScrollBarSize());
+
+        return aSize;
+    }
+
+    return SvTreeListBox::GetOptimalSize();
+}
+
+tools::Rectangle IconView::GetFocusRect(const SvTreeListEntry* pEntry, tools::Long)
+{
+    return { GetEntryPosition(pEntry), GetEntrySize(*pEntry) };
+}
+
+void IconView::PaintEntry(SvTreeListEntry& rEntry, tools::Long nX, tools::Long nY,
+                          vcl::RenderContext& rRenderContext)
+{
+    m_pImpl->UpdateContextBmpWidthMax(&rEntry);
+
+    const Size entrySize = GetEntrySize(rEntry);
+    short nTempEntryHeight = entrySize.Height();
+    short nTempEntryWidth = entrySize.Width();
+
+    Point aEntryPos(nX, nY);
+
+    auto popIt = rRenderContext.ScopedPush(vcl::PushFlags::FILLCOLOR | vcl::PushFlags::LINECOLOR
+                                           | vcl::PushFlags::FONT);
+    const Color aBackupColor = rRenderContext.GetFillColor();
+
+    const StyleSettings& rSettings = rRenderContext.GetSettings().GetStyleSettings();
+
+    const Size aOutputSize = GetOutputSizePixel();
+    if (aOutputSize.getHeight() < nTempEntryHeight)
+        nTempEntryHeight = aOutputSize.getHeight();
+
+    const SvViewDataEntry& rViewDataEntry = GetViewDataEntry(rEntry);
+
+    if (rViewDataEntry.IsHighlighted())
+    {
+        vcl::Font aHighlightFont(rRenderContext.GetFont());
+        const Color aHighlightTextColor(rSettings.GetHighlightTextColor());
+        aHighlightFont.SetColor(aHighlightTextColor);
+
+        // set font color to highlight
+        rRenderContext.SetTextColor(aHighlightTextColor);
+        rRenderContext.SetFont(aHighlightFont);
+    }
+
+    bool bFillColorSet = false;
+    // draw background
+    if (!(m_nTreeFlags & SvTreeFlags::USESEL))
+    {
+        // set background pattern/color
+        Wallpaper aWallpaper = rRenderContext.GetBackground();
+
+        if (rViewDataEntry.IsHighlighted())
+        {
+            Color aNewWallColor = rSettings.GetHighlightColor();
+            // if the face color is bright then the deactivate color is also bright
+            // -> so you can't see any deactivate selection
+            const WinBits nWindowStyle = GetStyle();
+            const bool bHideSelection = (nWindowStyle & WB_HIDESELECTION) != 0 && !HasFocus();
+            if (bHideSelection && !rSettings.GetFaceColor().IsBright()
+                && aWallpaper.GetColor().IsBright() != rSettings.GetDeactiveColor().IsBright())
+            {
+                aNewWallColor = rSettings.GetDeactiveColor();
+            }
+            aWallpaper.SetColor(aNewWallColor);
+        }
+
+        Color aBackgroundColor = aWallpaper.GetColor();
+        if (aBackgroundColor != COL_TRANSPARENT)
+        {
+            rRenderContext.SetFillColor(aBackgroundColor);
+            bFillColorSet = true;
+            // this case may occur for smaller horizontal resizes
+            if (nTempEntryWidth > 1)
+                rRenderContext.DrawRect({ aEntryPos, Size(nTempEntryWidth, nTempEntryHeight) });
+        }
+    }
+
+    const size_t nItemCount = rEntry.ItemCount();
+    size_t nIconItem = nItemCount;
+
+    int nLabelHeight = 0;
+    std::vector<size_t> aTextItems;
+
+    for (size_t nCurItem = 0; nCurItem < nItemCount; ++nCurItem)
+    {
+        SvLBoxItem& rItem = rEntry.GetItem(nCurItem);
+        SvLBoxItemType nItemType = rItem.GetType();
+
+        if (nItemType == SvLBoxItemType::ContextBmp)
+        {
+            nIconItem = nCurItem;
+            continue;
+        }
+
+        aTextItems.push_back(nCurItem);
+        auto nItemHeight = SvLBoxItem::GetHeight(rViewDataEntry, nCurItem);
+        nLabelHeight += nItemHeight;
+    }
+
+    int nLabelYPos = nY + nTempEntryHeight - nLabelHeight - nSpacing; // padding from bottom
+    for (auto nCurItem : aTextItems)
+    {
+        aEntryPos.setY(nLabelYPos);
+
+        auto nItemHeight = SvLBoxItem::GetHeight(rViewDataEntry, nCurItem);
+        nLabelYPos += nItemHeight;
+
+        rEntry.GetItem(nCurItem).Paint(aEntryPos, *this, rRenderContext, &rViewDataEntry, rEntry);
+    }
+
+    if (bFillColorSet)
+        rRenderContext.SetFillColor(aBackupColor);
+
+    // draw icon
+    if (nIconItem < nItemCount)
+    {
+        SvLBoxItem& rItem = rEntry.GetItem(nIconItem);
+        auto nItemWidth = rItem.GetWidth(*this, rViewDataEntry, nIconItem);
+        auto nItemHeight = SvLBoxItem::GetHeight(rViewDataEntry, nIconItem);
+
+        aEntryPos.setY(nY);
+
+        // center horizontally
+        aEntryPos.AdjustX((nTempEntryWidth - nItemWidth) / 2);
+        // center vertically
+        int nImageAreaHeight = nTempEntryHeight - nSpacing * 2; // spacings from top, from bottom
+        if (nLabelHeight > 0)
+        {
+            nImageAreaHeight -= nLabelHeight + nSpacing; // spacing between icon and label
+        }
+        aEntryPos.AdjustY((nImageAreaHeight - nItemHeight) / 2 + nSpacing);
+
+        rItem.Paint(aEntryPos, *this, rRenderContext, &rViewDataEntry, rEntry);
+    }
+}
+
+FactoryFunction IconView::GetUITestFactory() const { return IconViewUIObject::create; }
+
+/* vim:set shiftwidth=4 softtabstop=4 expandtab: */

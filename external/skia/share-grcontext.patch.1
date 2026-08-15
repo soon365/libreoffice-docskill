@@ -1,0 +1,831 @@
+diff -ur skia.org/tools/window/mac/GaneshMetalWindowContext_mac.mm skia/tools/window/mac/GaneshMetalWindowContext_mac.mm
+--- skia.org/tools/window/mac/GaneshMetalWindowContext_mac.mm	2024-10-10 14:11:32.362258108 +0200
++++ skia/tools/window/mac/GaneshMetalWindowContext_mac.mm	2024-10-10 14:12:40.748630164 +0200
+@@ -46,10 +46,14 @@
+ MetalWindowContext_mac::~MetalWindowContext_mac() { this->destroyContext(); }
+
+ bool MetalWindowContext_mac::onInitializeContext() {
++    // Allow creating just the shared context, without an associated window.
++    if(fMainView == nil)
++        return true;
++
+     SkASSERT(nil != fMainView);
+
+     fMetalLayer = [CAMetalLayer layer];
+-    fMetalLayer.device = fDevice.get();
++    fMetalLayer.device = fShared->fDevice.get();
+     fMetalLayer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+
+     // resize ignores the passed values and uses the fMainView directly.
+diff -ur skia.org/tools/window/MetalWindowContext.h skia/tools/window/MetalWindowContext.h
+--- skia.org/tools/window/MetalWindowContext.h	2024-10-10 14:11:32.362258108 +0200
++++ skia/tools/window/MetalWindowContext.h	2024-10-10 14:11:44.341323063 +0200
+@@ -14,13 +14,18 @@
+
+ #include "tools/window/WindowContext.h"
+
++#ifdef __OBJC__
+ #import <Metal/Metal.h>
+ #import <QuartzCore/CAMetalLayer.h>
++#endif
+
+ namespace skwindow::internal {
+
++#ifdef __OBJC__
+ class MetalWindowContext : public WindowContext {
+ public:
++    static GrDirectContext* getSharedGrDirectContext() { return fGlobalShared ? fGlobalShared->fContext.get() : nullptr; }
++
+     sk_sp<SkSurface> getBackbufferSurface() override;
+
+     bool isValid() override { return fValid; }
+@@ -40,14 +45,31 @@
+     void destroyContext();
+     virtual void onDestroyContext() = 0;
+
++    static void checkDestroyShared();
++
+     void onSwapBuffers() override;
+
+     bool                        fValid;
++
++    // We need to use just one GrDirectContext, so share all the relevant data.
++    struct Shared : public SkRefCnt
++    {
+     sk_cfp<id<MTLDevice>>       fDevice;
+     sk_cfp<id<MTLCommandQueue>> fQueue;
++    sk_sp<GrDirectContext> fContext;
++    };
++
++    sk_sp<Shared> fShared;
++
++    static sk_sp<Shared> fGlobalShared;
++
+     CAMetalLayer*               fMetalLayer;
+     GrMTLHandle                 fDrawableHandle;
+ };
++#endif // __OBJC__
++
++// Access function when header is used from C++ code that wouldn't handle ObjC++ headers.
++extern "C" SK_API GrDirectContext* getMetalSharedGrDirectContext();
+
+ }   // namespace skwindow::internal
+
+diff -ur skia.org/tools/window/MetalWindowContext.mm skia/tools/window/MetalWindowContext.mm
+--- skia.org/tools/window/MetalWindowContext.mm	2024-10-10 14:11:32.362258108 +0200
++++ skia/tools/window/MetalWindowContext.mm	2024-10-10 14:11:44.341323063 +0200
+@@ -33,54 +33,87 @@
+         , fDrawableHandle(nil) {}
+ 
+ void MetalWindowContext::initializeContext() {
++    fShared = fGlobalShared;
++    if( !fShared )
++    {
++    // TODO do we need a mutex?
++
++    fGlobalShared = sk_make_sp<Shared>();
++    Shared* d = fGlobalShared.get(); // shorter variable name
++
+     SkASSERT(!fContext);
+ 
+-    fDevice.reset(MTLCreateSystemDefaultDevice());
+-    fQueue.reset([*fDevice newCommandQueue]);
++    d->fDevice.reset(MTLCreateSystemDefaultDevice());
++    d->fQueue.reset([*d->fDevice newCommandQueue]);
+ 
+     if (fDisplayParams->msaaSampleCount() > 1) {
+         if (@available(macOS 10.11, iOS 9.0, tvOS 9.0, *)) {
+-            if (![*fDevice supportsTextureSampleCount:fDisplayParams->msaaSampleCount()]) {
++            if (![*d->fDevice supportsTextureSampleCount:fDisplayParams->msaaSampleCount()]) {
++                fGlobalShared.reset();
+                 return;
+             }
+         } else {
++            fGlobalShared.reset();
+             return;
+         }
+     }
+-    fSampleCount = fDisplayParams->msaaSampleCount();
+-    fStencilBits = 8;
+-
+-    fValid = this->onInitializeContext();
+ 
+     GrMtlBackendContext backendContext = {};
+-    backendContext.fDevice.retain((GrMTLHandle)fDevice.get());
+-    backendContext.fQueue.retain((GrMTLHandle)fQueue.get());
+-    fContext = GrDirectContexts::MakeMetal(backendContext, fDisplayParams->grContextOptions());
+-    if (!fContext && fDisplayParams->msaaSampleCount() > 1) {
++    backendContext.fDevice.retain((GrMTLHandle)d->fDevice.get());
++    backendContext.fQueue.retain((GrMTLHandle)d->fQueue.get());
++    d->fContext = GrDirectContexts::MakeMetal(backendContext, fDisplayParams->grContextOptions());
++    if (!d->fContext && fDisplayParams->msaaSampleCount() > 1) {
+         auto newParams = DisplayParamsBuilder(fDisplayParams.get());
+         newParams.msaaSampleCount(fDisplayParams->msaaSampleCount() / 2);
+         // Don't call this->setDisplayParams because that also calls
+         // destroyContext() and initializeContext().
+         fDisplayParams = newParams.detach();
++        fGlobalShared.reset();
+         this->initializeContext();
+         return;
+     }
++
++    fShared = fGlobalShared;
++    } // if( !fShared )
++
++    fContext = fShared->fContext;
++
++    fSampleCount = fDisplayParams->msaaSampleCount();
++    fStencilBits = 8;
++
++    fValid = this->onInitializeContext();
+ }
+ 
+ void MetalWindowContext::destroyContext() {
+-    if (fContext) {
+-        // in case we have outstanding refs to this (lua?)
+-        fContext->abandonContext();
+-        fContext.reset();
+-    }
+-
+     this->onDestroyContext();
+ 
+     fMetalLayer = nil;
+     fValid = false;
++    fContext.reset();
++    fShared.reset();
++
++    checkDestroyShared();
++}
++
++void MetalWindowContext::checkDestroyShared()
++{
++    if(!fGlobalShared || !fGlobalShared->unique()) // TODO mutex?
++        return;
++#ifndef SK_TRACE_VK_RESOURCES
++    if(!fGlobalShared->fContext->unique())
++        return;
++#endif
++    SkASSERT(fGlobalShared->fContext->unique());
++    if (fGlobalShared->fContext) {
++        // in case we have outstanding refs to this (lua?)
++        fGlobalShared->fContext->abandonContext();
++        fGlobalShared->fContext.reset();
++    }
++
++    fGlobalShared->fQueue.reset();
++    fGlobalShared->fDevice.reset();
+ 
+-    fQueue.reset();
+-    fDevice.reset();
++    fGlobalShared.reset();
+ }
+ 
+ sk_sp<SkSurface> MetalWindowContext::getBackbufferSurface() {
+@@ -124,7 +157,7 @@
+ void MetalWindowContext::onSwapBuffers() {
+     id<CAMetalDrawable> currentDrawable = (id<CAMetalDrawable>)fDrawableHandle;
+ 
+-    id<MTLCommandBuffer> commandBuffer([*fQueue commandBuffer]);
++    id<MTLCommandBuffer> commandBuffer([*fShared->fQueue commandBuffer]);
+     commandBuffer.label = @"Present";
+ 
+     [commandBuffer presentDrawable:currentDrawable];
+@@ -140,4 +173,11 @@
+     this->initializeContext();
+ }
+ 
++SK_API sk_sp<MetalWindowContext::Shared> MetalWindowContext::fGlobalShared;
++
++GrDirectContext* getMetalSharedGrDirectContext()
++{
++    return MetalWindowContext::getSharedGrDirectContext();
++}
++
+ }   //namespace skwindow::internal
+diff -ur skia.org/tools/window/unix/GaneshVulkanWindowContext_unix.cpp.orig skia/tools/window/unix/GaneshVulkanWindowContext_unix.cpp
+--- skia.org/tools/window/unix/GaneshVulkanWindowContext_unix.cpp.orig	2025-01-17 09:32:18.346355282 -0700
++++ skia/tools/window/unix/GaneshVulkanWindowContext_unix.cpp	2025-01-17 09:34:12.368151987 -0700
+@@ -23,7 +23,7 @@
+         return nullptr;
+     }
+
+-    auto createVkSurface = [&info, instProc](VkInstance instance) -> VkSurfaceKHR {
++    internal::VulkanWindowContext::CreateVkSurfaceFn createVkSurface = [&info, instProc](VkInstance instance) -> VkSurfaceKHR {
+         static PFN_vkCreateXcbSurfaceKHR createXcbSurfaceKHR = nullptr;
+         if (!createXcbSurfaceKHR) {
+             createXcbSurfaceKHR =
+@@ -47,6 +47,9 @@
+
+         return surface;
+     };
++    // Allow creating just the shared context, without an associated window.
++    if(info.fWindow == 0)
++        createVkSurface = nullptr;
+
+     auto canPresent = [&info, instProc](VkInstance instance,
+                                         VkPhysicalDevice physDev,
+@@ -68,7 +71,7 @@
+     };
+     std::unique_ptr<WindowContext> ctx(new internal::VulkanWindowContext(
+             std::move(displayParams), createVkSurface, canPresent, instProc));
+-    if (!ctx->isValid()) {
++    if (!ctx->isValid() && createVkSurface != nullptr) {
+         return nullptr;
+     }
+     return ctx;
+diff -ur skia.org/tools/window/VulkanWindowContext.cpp skia/tools/window/VulkanWindowContext.cpp
+--- skia.org/tools/window/VulkanWindowContext.cpp	2024-10-10 14:11:32.362258108 +0200
++++ skia/tools/window/VulkanWindowContext.cpp	2024-10-10 14:15:27.179546520 +0200
+@@ -31,9 +31,13 @@
+ #endif
+ 
+ #define GET_PROC(F) f ## F = \
+-    (PFN_vk ## F) backendContext.fGetProc("vk" #F, fInstance, VK_NULL_HANDLE)
++    (PFN_vk ## F) fGlobalShared->backendContext.fGetProc("vk" #F, fShared->fInstance, VK_NULL_HANDLE)
+ #define GET_DEV_PROC(F) f ## F = \
+-    (PFN_vk ## F) backendContext.fGetProc("vk" #F, VK_NULL_HANDLE, fDevice)
++    (PFN_vk ## F) fGlobalShared->backendContext.fGetProc("vk" #F, VK_NULL_HANDLE, fShared->fDevice)
++#define GET_PROC_GLOBAL(F) fGlobalShared->f ## F = \
++    (PFN_vk ## F) fGlobalShared->backendContext.fGetProc("vk" #F, fGlobalShared->fInstance, VK_NULL_HANDLE)
++#define GET_DEV_PROC_GLOBAL(F) fGlobalShared->f ## F = \
++    (PFN_vk ## F) fGlobalShared->backendContext.fGetProc("vk" #F, VK_NULL_HANDLE, fGlobalShared->fDevice)
+ 
+ namespace skwindow::internal {
+ 
+@@ -51,34 +55,44 @@
+ }
+ 
+ void VulkanWindowContext::initializeContext() {
++    fShared = fGlobalShared;
++    if( !fShared )
++    {
++    // TODO do we need a mutex?
++
++    fGlobalShared = sk_make_sp<Shared>();
++    Shared* d = fGlobalShared.get(); // shorter variable name
++
+     SkASSERT(!fContext);
+     // Any config code here (particularly for msaa)?
+ 
+     PFN_vkGetInstanceProcAddr getInstanceProc = fGetInstanceProcAddr;
+-    skgpu::VulkanBackendContext backendContext;
++    skgpu::VulkanBackendContext& backendContext = fGlobalShared->backendContext;
+     skgpu::VulkanExtensions extensions;
+     sk_gpu_test::TestVkFeatures features;
+     if (!sk_gpu_test::CreateVkBackendContext(getInstanceProc,
+                                              &backendContext,
+                                              &extensions,
+-                                             &features,
+-                                             &fDebugMessenger,
+-                                             &fPresentQueueIndex,
++                                             &d->features,
++                                             &d->fDebugMessenger,
++                                             &d->fPresentQueueIndex,
+                                              fCanPresentFn,
+                                              fDisplayParams->createProtectedNativeBackend())) {
++        fGlobalShared.reset();
+         return;
+     }
+ 
+     if (!extensions.hasExtension(VK_KHR_SURFACE_EXTENSION_NAME, 25) ||
+         !extensions.hasExtension(VK_KHR_SWAPCHAIN_EXTENSION_NAME, 68)) {
++        fGlobalShared.reset();
+         return;
+     }
+ 
+-    fInstance = backendContext.fInstance;
+-    fPhysicalDevice = backendContext.fPhysicalDevice;
+-    fDevice = backendContext.fDevice;
+-    fGraphicsQueueIndex = backendContext.fGraphicsQueueIndex;
+-    fGraphicsQueue = backendContext.fQueue;
++    d->fInstance = backendContext.fInstance;
++    d->fPhysicalDevice = backendContext.fPhysicalDevice;
++    d->fDevice = backendContext.fDevice;
++    d->fGraphicsQueueIndex = backendContext.fGraphicsQueueIndex;
++    d->fGraphicsQueue = backendContext.fQueue;
+ 
+     PFN_vkGetPhysicalDeviceProperties localGetPhysicalDeviceProperties =
+             reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(
+@@ -86,23 +100,35 @@
+                                             backendContext.fInstance,
+                                             VK_NULL_HANDLE));
+     if (!localGetPhysicalDeviceProperties) {
++        fGlobalShared.reset();
+         return;
+     }
+-    VkPhysicalDeviceProperties physDeviceProperties;
+-    localGetPhysicalDeviceProperties(backendContext.fPhysicalDevice, &physDeviceProperties);
+-    uint32_t physDevVersion = physDeviceProperties.apiVersion;
+-
+-    fInterface.reset(new skgpu::VulkanInterface(backendContext.fGetProc,
+-                                                fInstance,
+-                                                fDevice,
++    localGetPhysicalDeviceProperties(backendContext.fPhysicalDevice, &d->physDeviceProperties);
++    uint32_t physDevVersion = d->physDeviceProperties.apiVersion;
++
++    d->fInterface.reset(new skgpu::VulkanInterface(backendContext.fGetProc,
++                                                d->fInstance,
++                                                d->fDevice,
+                                                 backendContext.fMaxAPIVersion,
+                                                 physDevVersion,
+                                                 &extensions));
+ 
+-    GET_PROC(DestroyInstance);
+-    if (fDebugMessenger != VK_NULL_HANDLE) {
+-        GET_PROC(DestroyDebugUtilsMessengerEXT);
++    d->fContext = GrDirectContexts::MakeVulkan(backendContext, fDisplayParams->grContextOptions());
++
++    GET_PROC_GLOBAL(DestroyInstance);
++    GET_DEV_PROC_GLOBAL(DestroyDevice);
++    if (fGlobalShared->fDebugMessenger != VK_NULL_HANDLE) {
++        GET_PROC_GLOBAL(DestroyDebugUtilsMessengerEXT);
+     }
++
++    backendContext.fMemoryAllocator =
++            skgpu::VulkanMemoryAllocators::Make(backendContext, skgpu::ThreadSafe::kNo);
++
++    fShared = fGlobalShared;
++    } // if( !fShared )
++
++    fContext = fShared->fContext;
++
+     GET_PROC(DestroySurfaceKHR);
+     GET_PROC(GetPhysicalDeviceSurfaceSupportKHR);
+     GET_PROC(GetPhysicalDeviceSurfaceCapabilitiesKHR);
+@@ -110,7 +136,6 @@
+     GET_PROC(GetPhysicalDeviceSurfacePresentModesKHR);
+     GET_DEV_PROC(DeviceWaitIdle);
+     GET_DEV_PROC(QueueWaitIdle);
+-    GET_DEV_PROC(DestroyDevice);
+     GET_DEV_PROC(CreateSwapchainKHR);
+     GET_DEV_PROC(DestroySwapchainKHR);
+     GET_DEV_PROC(GetSwapchainImagesKHR);
+@@ -118,20 +143,22 @@
+     GET_DEV_PROC(QueuePresentKHR);
+     GET_DEV_PROC(GetDeviceQueue);
+ 
+-    backendContext.fMemoryAllocator =
+-            skgpu::VulkanMemoryAllocators::Make(backendContext, skgpu::ThreadSafe::kNo);
+-
+-    fContext = GrDirectContexts::MakeVulkan(backendContext, fDisplayParams->grContextOptions());
+-
+-    fDeviceSurface = fCreateVkSurfaceFn(fInstance);
++    // No actual window, used just to create the shared GrContext.
++    if(fCreateVkSurfaceFn == nullptr)
++        return;
++ 
++    fDeviceSurface = fCreateVkSurfaceFn(fShared->fInstance);
+     if (VK_NULL_HANDLE == fDeviceSurface) {
+         this->destroyContext();
+         return;
+     }
+ 
++    // create presentQueue
++    fGetDeviceQueue(fShared->fDevice, fShared->fPresentQueueIndex, 0, &fPresentQueue);
++
+     VkBool32 supported;
+     VkResult res = fGetPhysicalDeviceSurfaceSupportKHR(
+-            fPhysicalDevice, fPresentQueueIndex, fDeviceSurface, &supported);
++            fShared->fPhysicalDevice, fShared->fPresentQueueIndex, fDeviceSurface, &supported);
+     if (VK_SUCCESS != res) {
+         this->destroyContext();
+         return;
+@@ -141,20 +168,18 @@
+         this->destroyContext();
+         return;
+     }
+-
+-    fGetDeviceQueue(fDevice, fPresentQueueIndex, /*queueIndex=*/0, &fPresentQueue);
+ }
+ 
+ bool VulkanWindowContext::createSwapchain(int width, int height) {
+     // Check surface capabilities
+     VkSurfaceCapabilitiesKHR caps;
+-    VkResult res = fGetPhysicalDeviceSurfaceCapabilitiesKHR(fPhysicalDevice, fDeviceSurface, &caps);
++    VkResult res = fGetPhysicalDeviceSurfaceCapabilitiesKHR(fShared->fPhysicalDevice, fDeviceSurface, &caps);
+     if (VK_SUCCESS != res) {
+         return false;
+     }
+ 
+     uint32_t surfaceFormatCount;
+-    res = fGetPhysicalDeviceSurfaceFormatsKHR(fPhysicalDevice, fDeviceSurface, &surfaceFormatCount,
++    res = fGetPhysicalDeviceSurfaceFormatsKHR(fShared->fPhysicalDevice, fDeviceSurface, &surfaceFormatCount,
+                                               nullptr);
+     if (VK_SUCCESS != res) {
+         return false;
+@@ -162,14 +187,14 @@
+ 
+     SkAutoMalloc surfaceFormatAlloc(surfaceFormatCount * sizeof(VkSurfaceFormatKHR));
+     VkSurfaceFormatKHR* surfaceFormats = (VkSurfaceFormatKHR*)surfaceFormatAlloc.get();
+-    res = fGetPhysicalDeviceSurfaceFormatsKHR(fPhysicalDevice, fDeviceSurface, &surfaceFormatCount,
++    res = fGetPhysicalDeviceSurfaceFormatsKHR(fShared->fPhysicalDevice, fDeviceSurface, &surfaceFormatCount,
+                                               surfaceFormats);
+     if (VK_SUCCESS != res) {
+         return false;
+     }
+ 
+     uint32_t presentModeCount;
+-    res = fGetPhysicalDeviceSurfacePresentModesKHR(fPhysicalDevice, fDeviceSurface, &presentModeCount,
++    res = fGetPhysicalDeviceSurfacePresentModesKHR(fShared->fPhysicalDevice, fDeviceSurface, &presentModeCount,
+                                                    nullptr);
+     if (VK_SUCCESS != res) {
+         return false;
+@@ -177,7 +202,7 @@
+ 
+     SkAutoMalloc presentModeAlloc(presentModeCount * sizeof(VkPresentModeKHR));
+     VkPresentModeKHR* presentModes = (VkPresentModeKHR*)presentModeAlloc.get();
+-    res = fGetPhysicalDeviceSurfacePresentModesKHR(fPhysicalDevice, fDeviceSurface, &presentModeCount,
++    res = fGetPhysicalDeviceSurfacePresentModesKHR(fShared->fPhysicalDevice, fDeviceSurface, &presentModeCount,
+                                                    presentModes);
+     if (VK_SUCCESS != res) {
+         return false;
+@@ -289,8 +314,8 @@
+     swapchainCreateInfo.imageArrayLayers = 1;
+     swapchainCreateInfo.imageUsage = usageFlags;
+ 
+-    uint32_t queueFamilies[] = { fGraphicsQueueIndex, fPresentQueueIndex };
+-    if (fGraphicsQueueIndex != fPresentQueueIndex) {
++    uint32_t queueFamilies[] = { fShared->fGraphicsQueueIndex, fShared->fPresentQueueIndex };
++    if (fShared->fGraphicsQueueIndex != fShared->fPresentQueueIndex) {
+         swapchainCreateInfo.imageSharingMode = VK_SHARING_MODE_CONCURRENT;
+         swapchainCreateInfo.queueFamilyIndexCount = 2;
+         swapchainCreateInfo.pQueueFamilyIndices = queueFamilies;
+@@ -306,16 +331,16 @@
+     swapchainCreateInfo.clipped = true;
+     swapchainCreateInfo.oldSwapchain = fSwapchain;
+ 
+-    res = fCreateSwapchainKHR(fDevice, &swapchainCreateInfo, nullptr, &fSwapchain);
++    res = fCreateSwapchainKHR(fShared->fDevice, &swapchainCreateInfo, nullptr, &fSwapchain);
+     if (VK_SUCCESS != res) {
+         return false;
+     }
+ 
+     // Destroy the old swapchain
+     if (swapchainCreateInfo.oldSwapchain != VK_NULL_HANDLE) {
+-        fDeviceWaitIdle(fDevice);
++        fDeviceWaitIdle(fShared->fDevice);
+         this->resetSwapchainImages();
+-        fDestroySwapchainKHR(fDevice, swapchainCreateInfo.oldSwapchain, nullptr);
++        fDestroySwapchainKHR(fShared->fDevice, swapchainCreateInfo.oldSwapchain, nullptr);
+         swapchainCreateInfo.oldSwapchain = VK_NULL_HANDLE;
+     }
+     // If buffer creation fails, destroy the swapchain.
+@@ -323,9 +348,9 @@
+                                        usageFlags,
+                                        colorType,
+                                        swapchainCreateInfo.imageSharingMode)) {
+-        fDeviceWaitIdle(fDevice);
++        fDeviceWaitIdle(fShared->fDevice);
+         this->resetSwapchainImages();
+-        fDestroySwapchainKHR(fDevice, swapchainCreateInfo.oldSwapchain, nullptr);
++        fDestroySwapchainKHR(fShared->fDevice, swapchainCreateInfo.oldSwapchain, nullptr);
+         swapchainCreateInfo.oldSwapchain = VK_NULL_HANDLE;
+         return false;
+     }
+@@ -339,13 +364,13 @@
+                                                   VkSharingMode sharingMode) {
+     // Determine number of swapchain images
+     uint32_t swapchainImgCount;
+-    fGetSwapchainImagesKHR(fDevice, fSwapchain, &swapchainImgCount, /*pSwapchainImages*/nullptr);
++    fGetSwapchainImagesKHR(fShared->fDevice, fSwapchain, &swapchainImgCount, /*pSwapchainImages*/nullptr);
+     SkASSERT(swapchainImgCount);
+ 
+     // Define an array of VkImages and query the driver to populate it
+     skia_private::AutoTArray<VkImage> vkImages((size_t)swapchainImgCount);
+     std::fill_n(vkImages.get(), swapchainImgCount, VK_NULL_HANDLE);
+-    fGetSwapchainImagesKHR(fDevice, fSwapchain, &swapchainImgCount, vkImages.get());
++    fGetSwapchainImagesKHR(fShared->fDevice, fSwapchain, &swapchainImgCount, vkImages.get());
+ 
+     // Populate all swapchain image representations
+     fImages = skia_private::AutoTArray<SwapchainImage>((size_t)swapchainImgCount);
+@@ -358,8 +383,8 @@
+         static const VkSemaphoreCreateInfo submitSemInfo =
+                 {VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, /*pNext=*/nullptr, /*flags=*/0};
+         SkDEBUGCODE(VkResult result = )GR_VK_CALL(
+-                fInterface,
+-                CreateSemaphore(fDevice,
++                fShared->fInterface,
++                CreateSemaphore(fShared->fDevice,
+                                 &submitSemInfo,
+                                 /*pAllocator=*/nullptr,
+                                 &fImages[i].fRenderCompletionSemaphore));
+@@ -372,7 +397,7 @@
+         info.fFormat = format;
+         info.fImageUsageFlags = usageFlags;
+         info.fLevelCount = 1;
+-        info.fCurrentQueueFamily = fPresentQueueIndex;
++        info.fCurrentQueueFamily = fShared->fPresentQueueIndex;
+         info.fProtected = skgpu::Protected(fDisplayParams->createProtectedNativeBackend());
+         info.fSharingMode = sharingMode;
+ 
+@@ -422,7 +447,7 @@
+     info.fNumSemaphores = 1;
+     info.fSignalSemaphores = &backendRenderSemaphore;
+     skgpu::MutableTextureState presentState = skgpu::MutableTextureStates::MakeVulkan(
+-            VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, fPresentQueueIndex);
++            VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, fShared->fPresentQueueIndex);
+     auto dContext = surface->recordingContext()->asDirectContext();
+     dContext->flush(surface, info, &presentState);
+     dContext->submit();
+@@ -436,7 +461,7 @@
+     // Clean up the image's semaphores
+     for (size_t i = 0; i < fImages.size(); i++) {
+         if (fImages[i].fRenderCompletionSemaphore != VK_NULL_HANDLE) {
+-            GR_VK_CALL(fInterface, DestroySemaphore(fDevice,
++            GR_VK_CALL(fShared->fInterface, DestroySemaphore(fShared->fDevice,
+                                                     fImages[i].fRenderCompletionSemaphore,
+                                                     /*pAllocator=*/nullptr));
+         }
+@@ -452,42 +477,58 @@
+ void VulkanWindowContext::destroyContext() {
+     if (this->isValid()) {
+         fQueueWaitIdle(fPresentQueue);
+-        fDeviceWaitIdle(fDevice);
++        fDeviceWaitIdle(fShared->fDevice);
+ 
+         this->resetSwapchainImages();
+ 
+         if (VK_NULL_HANDLE != fSwapchain) {
+-            fDestroySwapchainKHR(fDevice, fSwapchain, nullptr);
++            fDestroySwapchainKHR(fShared->fDevice, fSwapchain, nullptr);
+             fSwapchain = VK_NULL_HANDLE;
+         }
+ 
+         if (VK_NULL_HANDLE != fDeviceSurface) {
+-            fDestroySurfaceKHR(fInstance, fDeviceSurface, nullptr);
++            fDestroySurfaceKHR(fShared->fInstance, fDeviceSurface, nullptr);
+             fDeviceSurface = VK_NULL_HANDLE;
+         }
+     }
+ 
+-    SkASSERT(fContext->unique());
+     fContext.reset();
+-    fInterface.reset();
++    fShared.reset();
++    
++    checkDestroyShared();
++}
+ 
+-    if (VK_NULL_HANDLE != fDevice) {
+-        fDestroyDevice(fDevice, nullptr);
+-        fDevice = VK_NULL_HANDLE;
++void VulkanWindowContext::checkDestroyShared()
++{
++    if(!fGlobalShared || !fGlobalShared->unique()) // TODO mutex?
++        return;
++#ifndef SK_TRACE_VK_RESOURCES
++    if(!fGlobalShared->fContext->unique())
++        return;
++#endif
++    SkASSERT(fGlobalShared->fContext->unique());
++    fGlobalShared->fContext.reset();
++    fGlobalShared->fInterface.reset();
++
++    if (VK_NULL_HANDLE != fGlobalShared->fDevice) {
++        fGlobalShared->fDestroyDevice(fGlobalShared->fDevice, nullptr);
++        fGlobalShared->fDevice = VK_NULL_HANDLE;
+     }
+ 
+ #ifdef SK_ENABLE_VK_LAYERS
+-    if (fDebugMessenger != VK_NULL_HANDLE) {
+-        fDestroyDebugUtilsMessengerEXT(fInstance, fDebugMessenger, nullptr);
++    if (fGlobalShared->fDebugMessenger != VK_NULL_HANDLE) {
++        fGlobalShared->fDestroyDebugUtilsMessengerEXT(fGlobalShared->fInstance, fGlobalShared->fDebugMessenger, nullptr);
+     }
+ #endif
+ 
+-    fPhysicalDevice = VK_NULL_HANDLE;
++    fGlobalShared->fPhysicalDevice = VK_NULL_HANDLE;
+ 
+-    if (VK_NULL_HANDLE != fInstance) {
+-        fDestroyInstance(fInstance, nullptr);
+-        fInstance = VK_NULL_HANDLE;
++    if (VK_NULL_HANDLE != fGlobalShared->fInstance) {
++        fGlobalShared->fDestroyInstance(fGlobalShared->fInstance, nullptr);
++        fGlobalShared->fInstance = VK_NULL_HANDLE;
+     }
++
++    fGlobalShared.reset();
+ }
+ 
+ sk_sp<SkSurface> VulkanWindowContext::getBackbufferSurface() {
+@@ -495,12 +536,12 @@
+     static const VkSemaphoreCreateInfo acquireSemInfo =
+             { VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, /*pNext=*/nullptr, /*flags=*/0 };
+     SkDEBUGCODE(VkResult result = )GR_VK_CALL(
+-            fInterface,
+-            CreateSemaphore(fDevice, &acquireSemInfo, /*pAllocator=*/nullptr, &fAcquireSemaphore));
++            fShared->fInterface,
++            CreateSemaphore(fShared->fDevice, &acquireSemInfo, /*pAllocator=*/nullptr, &fAcquireSemaphore));
+     SkASSERT(result == VK_SUCCESS && fAcquireSemaphore != VK_NULL_HANDLE);
+ 
+     // Acquire the next available presentable image's index.
+-    VkResult res = fAcquireNextImageKHR(fDevice,
++    VkResult res = fAcquireNextImageKHR(fShared->fDevice,
+                                         fSwapchain,
+                                         /*timeout=*/UINT64_MAX,
+                                         fAcquireSemaphore,
+@@ -508,26 +549,26 @@
+                                         &fCurrentImageIndex);
+     if (VK_ERROR_SURFACE_LOST_KHR == res) {
+         // TODO: Recreate fDeviceSurface using fCreateVkSurfaceFn, and then rebuild the swapchain
+-        GR_VK_CALL(fInterface,
+-                   DestroySemaphore(fDevice, fAcquireSemaphore, /*pAllocator=*/nullptr));
++        GR_VK_CALL(fShared->fInterface,
++                   DestroySemaphore(fShared->fDevice, fAcquireSemaphore, /*pAllocator=*/nullptr));
+         return nullptr;
+     }
+     if (VK_ERROR_OUT_OF_DATE_KHR == res) {
+         if (!this->createSwapchain(-1, -1)) {
+-            GR_VK_CALL(fInterface,
+-                       DestroySemaphore(fDevice, fAcquireSemaphore, /*pAllocator=*/nullptr));
++            GR_VK_CALL(fShared->fInterface,
++                       DestroySemaphore(fShared->fDevice, fAcquireSemaphore, /*pAllocator=*/nullptr));
+             return nullptr;
+         }
+ 
+-        res = fAcquireNextImageKHR(fDevice,
++        res = fAcquireNextImageKHR(fShared->fDevice,
+                                    fSwapchain,
+                                    UINT64_MAX,
+                                    fAcquireSemaphore,
+                                    /*VkFence=*/VK_NULL_HANDLE,
+                                    &fCurrentImageIndex);
+         if (VK_SUCCESS != res) {
+-            GR_VK_CALL(fInterface,
+-                       DestroySemaphore(fDevice, fAcquireSemaphore, /*pAllocator=*/nullptr));
++            GR_VK_CALL(fShared->fInterface,
++                       DestroySemaphore(fShared->fDevice, fAcquireSemaphore, /*pAllocator=*/nullptr));
+             return nullptr;
+         }
+     }
+@@ -557,4 +598,6 @@
+     fQueuePresentKHR(fPresentQueue, &presentInfo);
+ }
+ 
++SK_API sk_sp<VulkanWindowContext::Shared> VulkanWindowContext::fGlobalShared;
++
+ }  // namespace skwindow::internal
+diff -ur skia.org/tools/window/VulkanWindowContext.h skia/tools/window/VulkanWindowContext.h
+--- skia.org/tools/window/VulkanWindowContext.h	2024-10-10 14:11:32.361258102 +0200
++++ skia/tools/window/VulkanWindowContext.h	2024-10-10 14:11:44.342323068 +0200
+@@ -14,18 +14,22 @@
+ #include "tools/gpu/vk/VkTestUtils.h"
+ #include "tools/window/WindowContext.h"
+ 
++#include <cassert>
++
+ class GrRenderTarget;
+ 
+ namespace skgpu { struct VulkanInterface; }
+ namespace skwindow::internal {
+ 
+-class VulkanWindowContext : public WindowContext {
++class SK_API VulkanWindowContext : public WindowContext {
+ public:
+     ~VulkanWindowContext() override;
+ 
++    static GrDirectContext* getSharedGrDirectContext() { return fGlobalShared ? fGlobalShared->fContext.get() : nullptr; }
++
+     sk_sp<SkSurface> getBackbufferSurface() override;
+ 
+-    bool isValid() override { return fDevice != VK_NULL_HANDLE; }
++    bool isValid() override { return fDeviceSurface != VK_NULL_HANDLE; }
+ 
+     void resize(int w, int h) override { this->createSwapchain(w, h); }
+ 
+@@ -45,9 +49,15 @@
+                         CanPresentFn,
+                         PFN_vkGetInstanceProcAddr);
+ 
++    static const VkPhysicalDeviceProperties& getPhysDeviceProperties() {
++        assert( fGlobalShared != nullptr );
++        return fGlobalShared->physDeviceProperties;
++    }
++
+ private:
+     void initializeContext();
+     void destroyContext();
++    static void checkDestroyShared();
+ 
+     bool createSwapchain(int width, int height);
+     bool populateSwapchainImages(VkFormat, VkImageUsageFlags, SkColorType, VkSharingMode);
+@@ -87,16 +97,8 @@
+     VkSemaphore fAcquireSemaphore = VK_NULL_HANDLE; /* Semaphore to signal image acquisition */
+     sk_sp<const skgpu::VulkanInterface> fInterface;
+ 
+-    /* Vulkan driver structs + info */
+-    VkInstance fInstance = VK_NULL_HANDLE;
+-    VkPhysicalDevice fPhysicalDevice = VK_NULL_HANDLE;
+-    VkDevice fDevice = VK_NULL_HANDLE;
+-    VkDebugUtilsMessengerEXT fDebugMessenger = VK_NULL_HANDLE;
+-    VkSurfaceKHR fDeviceSurface;
+-    VkSwapchainKHR fSwapchain;
+-    uint32_t fGraphicsQueueIndex;
+-    VkQueue fGraphicsQueue;
+-    uint32_t fPresentQueueIndex;
++    VkSurfaceKHR      fDeviceSurface;
++    VkSwapchainKHR    fSwapchain;
+     VkQueue fPresentQueue;
+ 
+     /* Create functions */
+@@ -118,12 +120,44 @@
+     PFN_vkAcquireNextImageKHR fAcquireNextImageKHR = nullptr;
+     PFN_vkQueuePresentKHR fQueuePresentKHR = nullptr;
+ 
+-    PFN_vkDestroyInstance fDestroyInstance = nullptr;
+     PFN_vkDeviceWaitIdle fDeviceWaitIdle = nullptr;
+-    PFN_vkDestroyDebugUtilsMessengerEXT fDestroyDebugUtilsMessengerEXT = nullptr;
+     PFN_vkQueueWaitIdle fQueueWaitIdle = nullptr;
+-    PFN_vkDestroyDevice fDestroyDevice = nullptr;
+     PFN_vkGetDeviceQueue fGetDeviceQueue = nullptr;
++    
++    // We need to use just one GrDirectContext, so share all the relevant data.
++    struct Shared : public SkRefCnt
++    {
++    PFN_vkDestroyInstance fDestroyInstance = nullptr;
++    PFN_vkDestroyDevice fDestroyDevice = nullptr;
++    PFN_vkDestroyDebugUtilsMessengerEXT fDestroyDebugUtilsMessengerEXT = nullptr;
++
++    VkInstance fInstance = VK_NULL_HANDLE;
++    VkPhysicalDevice fPhysicalDevice = VK_NULL_HANDLE;
++    VkDevice fDevice = VK_NULL_HANDLE;
++    VkDebugUtilsMessengerEXT fDebugMessenger = VK_NULL_HANDLE;
++
++    sk_sp<const skgpu::VulkanInterface> fInterface;
++    
++    // Original code had this as a function-local variable, but that seems wrong.
++    // It should exist as long as the context exists.
++    sk_gpu_test::TestVkFeatures features;
++
++    // Store this to make it accessible.
++    VkPhysicalDeviceProperties physDeviceProperties;
++
++    skgpu::VulkanBackendContext backendContext;
++    
++    /* Vulkan driver structs + info */
++    uint32_t fGraphicsQueueIndex;
++    VkQueue fGraphicsQueue;
++    uint32_t fPresentQueueIndex;
++    
++    sk_sp<GrDirectContext> fContext;
++    };
++
++    sk_sp<Shared> fShared;
++
++    static sk_sp<Shared> fGlobalShared;
+ };
+ 
+ }  // namespace skwindow::internal
+diff -ur skia.org/tools/window/win/VulkanWindowContext_win.cpp skia/tools/window/win/VulkanWindowContext_win.cpp
+--- skia.org/tools/window/win/VulkanWindowContext_win.cpp	2024-10-10 14:11:32.362258108 +0200
++++ skia/tools/window/win/VulkanWindowContext_win.cpp	2024-10-10 14:11:44.342323068 +0200
+@@ -25,7 +25,7 @@
+         return nullptr;
+     }
+
+-    auto createVkSurface = [hwnd, instProc] (VkInstance instance) -> VkSurfaceKHR {
++    internal::VulkanWindowContext::CreateVkSurfaceFn createVkSurface = [hwnd, instProc] (VkInstance instance) -> VkSurfaceKHR {
+         static PFN_vkCreateWin32SurfaceKHR createWin32SurfaceKHR = nullptr;
+         if (!createWin32SurfaceKHR) {
+             createWin32SurfaceKHR = (PFN_vkCreateWin32SurfaceKHR)
+@@ -49,6 +49,9 @@
+
+         return surface;
+     };
++    // Allow creating just the shared context, without an associated window.
++    if(hwnd == nullptr)
++        createVkSurface = nullptr;
+
+     auto canPresent = [instProc] (VkInstance instance, VkPhysicalDevice physDev,
+                                   uint32_t queueFamilyIndex) {
+@@ -66,7 +69,7 @@
+
+     std::unique_ptr<WindowContext> ctx(new internal::VulkanWindowContext(
+             std::move(params), createVkSurface, canPresent, instProc));
+-    if (!ctx->isValid()) {
++    if (!ctx->isValid() && createVkSurface != nullptr) {
+         return nullptr;
+     }
+     return ctx;
+diff -ur skia.org/tools/window/WindowContext.h skia/tools/window/WindowContext.h
+--- skia.org/tools/window/WindowContext.h	2024-10-10 14:11:32.361258102 +0200
++++ skia/tools/window/WindowContext.h	2024-10-10 14:11:44.342323068 +0200
+@@ -13,16 +13,13 @@
+ 
+ #if defined(SK_GANESH)
+ #include "include/gpu/ganesh/GrTypes.h"
++#include "include/gpu/ganesh/GrDirectContext.h"
+ #endif
+ 
+ #include <functional>
+ 
+ class SkSurface;
+ 
+-#if defined(SK_GANESH)
+-class GrDirectContext;
+-#endif
+-
+ #if defined(SK_GRAPHITE)
+ namespace skgpu::graphite {
+ class Context;

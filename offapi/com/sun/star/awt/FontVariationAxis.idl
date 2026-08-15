@@ -1,0 +1,45 @@
+/* -*- Mode: C++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
+/*
+ * This file is part of the LibreOffice project.
+ *
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ */
+
+
+module com {  module sun {  module star {  module awt {
+
+
+/** describes a single variation axis of a variable font.
+
+    @since LibreOffice 25.8
+ */
+struct FontVariationAxis
+{
+    /** the four-character OpenType axis tag, e.g. "wght" or "wdth".
+     */
+    string Tag;
+
+    /** the human-readable axis name as defined by the font, in the UI
+        language if available.
+     */
+    string Name;
+
+    /** the smallest value the axis accepts.
+     */
+    double MinValue;
+
+    /** the axis value used when no explicit setting is supplied.
+     */
+    double DefaultValue;
+
+    /** the largest value the axis accepts.
+     */
+    double MaxValue;
+};
+
+
+}; }; }; };
+
+/* vim:set shiftwidth=4 softtabstop=4 expandtab: */

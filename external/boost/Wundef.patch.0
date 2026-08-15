@@ -1,0 +1,20 @@
+--- boost/locale/detail/facet_id.hpp
++++ boost/locale/detail/facet_id.hpp
+@@ -12,7 +12,7 @@
+ 
+ /// \cond INTERNAL
+ namespace boost { namespace locale { namespace detail {
+-#if BOOST_CLANG_VERSION >= 40900
++#if defined BOOST_CLANG_VERSION && BOOST_CLANG_VERSION >= 40900
+ #    pragma clang diagnostic push
+ #    pragma clang diagnostic ignored "-Wundefined-var-template"
+ #endif
+@@ -25,7 +25,7 @@
+     struct BOOST_LOCALE_DECL facet_id {
+         static std::locale::id id;
+     };
+-#if BOOST_CLANG_VERSION >= 40900
++#if defined BOOST_CLANG_VERSION && BOOST_CLANG_VERSION >= 40900
+ #    pragma clang diagnostic pop
+ #endif
+ }}} // namespace boost::locale::detail
