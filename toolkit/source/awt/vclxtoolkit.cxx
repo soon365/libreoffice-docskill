@@ -1338,6 +1338,26 @@ void SVTXRoadmap::ImplGetPropertyIds( std::vector< sal_uInt16 > &rIds )
     VCLXGraphicControl::ImplGetPropertyIds( rIds );
 }
 
+#ifdef _WIN32
+// Parent frames were created without WS_CLIPCHILDREN. Hovering a native
+// menubar invalidates the shell client and paints over nested SYSTEMCHILD
+// editors (blank gray hole).
+static void lcl_enableClipChildrenChain( vcl::Window* pWin )
+{
+    for ( vcl::Window* p = pWin; p; p = p->GetParent() )
+    {
+        p->SetStyle( p->GetStyle() | WB_CLIPCHILDREN );
+        const SystemEnvData* pData = p->GetSystemData();
+        if ( !pData || !pData->hWnd )
+            continue;
+        HWND h = pData->hWnd;
+        LONG_PTR nStyle = GetWindowLongPtrW( h, GWL_STYLE );
+        if ( !( nStyle & WS_CLIPCHILDREN ) )
+            SetWindowLongPtrW( h, GWL_STYLE, nStyle | WS_CLIPCHILDREN );
+    }
+}
+#endif
+
 vcl::Window* VCLXToolkit::ImplCreateWindow( rtl::Reference<VCLXWindow>* ppNewComp,
     const css::awt::WindowDescriptor& rDescriptor,
     vcl::Window* pParent, WinBits nWinBits, MessBoxStyle nMessBoxStyle )
@@ -1689,7 +1709,18 @@ vcl::Window* VCLXToolkit::ImplCreateWindow( rtl::Reference<VCLXWindow>* ppNewCom
                         }
 
                         if (!pNewWindow)
+                        {
+                            // Nested SDI: a TOP WorkWindow with a VCL parent
+                            // must be a WS_CHILD SalFrame so the editor stays
+                            // inside the sticky shell center hole.
+                            if ( pParent )
+                                nWinBits |= WB_SYSTEMCHILDWINDOW | WB_CLIPCHILDREN;
                             pNewWindow = VclPtr<WorkWindow>::Create( pParent, nWinBits );
+#ifdef _WIN32
+                            if ( pParent )
+                                lcl_enableClipChildrenChain( pParent );
+#endif
+                        }
                     }
 
                     *ppNewComp = new VCLXTopWindow();
