@@ -4,8 +4,8 @@ import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.PointF;
 import android.graphics.RectF;
-import androidx.core.view.GestureDetectorCompat;
 import android.util.AttributeSet;
+import android.view.GestureDetector;
 import android.view.GestureDetector.SimpleOnGestureListener;
 import android.view.MotionEvent;
 import android.view.View;
@@ -36,7 +36,7 @@ public class CalcHeadersView extends View {
     private ArrayList<Float> mDimens;
     private RectF mCellCursorRect;
     private boolean mPendingRowOrColumnSelectionToShowUp;
-    private GestureDetectorCompat mDetector;
+    private GestureDetector mDetector;
     private PopupWindow mPopupWindow;
     private int mPrevScrollIndex = -1;
 
@@ -60,7 +60,7 @@ public class CalcHeadersView extends View {
             LOKitShell.getMainHandler().post(new Runnable() {
                 @Override
                 public void run() {
-                    mDetector = new GestureDetectorCompat(getContext(), new HeaderGestureListener());
+                    mDetector = new GestureDetector(getContext(), new HeaderGestureListener());
                 }
             });
 
@@ -276,3 +276,4 @@ public class CalcHeadersView extends View {
         }
     }
 }
+

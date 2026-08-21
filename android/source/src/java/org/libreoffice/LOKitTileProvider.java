@@ -647,10 +647,16 @@ class LOKitTileProvider implements TileProvider {
      * @see TileProvider#sendKeyEvent(android.view.KeyEvent)
      */
     @Override
+    @SuppressWarnings("deprecation")
     public void sendKeyEvent(KeyEvent keyEvent) {
         switch (keyEvent.getAction()) {
             case KeyEvent.ACTION_MULTIPLE:
+                // ACTION_MULTIPLE / getCharacters() removed from modern IME paths;
+                // keep for rare legacy input sources.
                 String keyString = keyEvent.getCharacters();
+                if (keyString == null) {
+                    break;
+                }
                 for (int i = 0; i < keyString.length(); i++) {
                     int codePoint = keyString.codePointAt(i);
                     mDocument.postKeyEvent(Document.KEY_EVENT_PRESS, codePoint, getKeyCode(keyEvent));
@@ -821,3 +827,4 @@ class LOKitTileProvider implements TileProvider {
 }
 
 // vim:set shiftwidth=4 softtabstop=4 expandtab:
+

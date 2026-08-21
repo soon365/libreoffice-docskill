@@ -54,7 +54,7 @@ public class ColorPaletteAdapter extends RecyclerView.Adapter<ColorPaletteAdapte
             @Override
             public void onClick(View view) {
                 LibreOfficeMainActivity.setDocumentChanged(true);
-                setPosition(holder.getAdapterPosition());
+                setPosition(holder.getBindingAdapterPosition());
             }
         });
         if (animate) //it will only animate when the upper color box is selected
@@ -133,3 +133,4 @@ public class ColorPaletteAdapter extends RecyclerView.Adapter<ColorPaletteAdapte
 
 
 }
+

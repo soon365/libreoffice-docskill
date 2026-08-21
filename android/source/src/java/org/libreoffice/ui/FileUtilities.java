@@ -152,8 +152,16 @@ public class FileUtilities {
                 cursor.close();
             }
         }
+        // file:// and some providers don't expose DISPLAY_NAME — fall back to path segment
+        if (displayName == null || displayName.isEmpty()) {
+            displayName = docUri.getLastPathSegment();
+            if (displayName == null) {
+                displayName = "";
+            }
+        }
         return displayName;
     }
 }
 
 /* vim:set shiftwidth=4 softtabstop=4 expandtab: */
+

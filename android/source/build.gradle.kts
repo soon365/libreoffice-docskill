@@ -266,22 +266,109 @@ tasks.register("createStrippedConfig") {
     }
 }
 
-tasks.register<Exec>("createStrippedConfigMain") {
-    dependsOn("createStrippedConfig")
-    inputs.files("$liboInstdir/share/registry/main.xcd", "$liboSrcRoot/android/mobile-config.py")
-    outputs.file("assets_strippedUI/share/registry/main.xcd")
-    executable = "$liboSrcRoot/android/mobile-config.py"
-    args("$liboInstdir/share/registry/main.xcd", "assets_strippedUI/share/registry/main.xcd")
+// Windows CreateProcess cannot run shebang .py (error 193). Invoke via WSL python3.
+// Never use project.file() on Linux-style paths on Windows — File treats "/mnt/..." as relative.
+val isWindowsHost = System.getProperty("os.name").lowercase().contains("windows")
+
+fun Project.toWslPath(path: String): String {
+    var s = path.replace('\\', '/')
+
+    // Already a Linux absolute path (possibly wrongly prefixed by Windows File resolution)
+    val doubled = Regex("^(.*)/mnt/([a-z])/(.*)$").matchEntire(s)
+    if (doubled != null && doubled.groupValues[1].contains("android")) {
+        // e.g. C:/.../source/mnt/c/docskill... -> /mnt/c/docskill...
+        return "/mnt/${doubled.groupValues[2]}/${doubled.groupValues[3]}"
+    }
+    if (s.startsWith("/mnt/") || (s.startsWith("/") && !s.startsWith("//"))) {
+        return s
+    }
+
+    val unc = Regex("^//wsl(?:\\.localhost|\\$)/([^/]+)/(.*)$").matchEntire(s)
+    if (unc != null) {
+        return "/" + unc.groupValues[2]
+    }
+
+    val drive = Regex("^([A-Za-z]):/(.*)$").matchEntire(s)
+    if (drive != null) {
+        return "/mnt/${drive.groupValues[1].lowercase()}/${drive.groupValues[2]}"
+    }
+
+    // Relative path -> absolute Windows path, then to /mnt/...
+    val absWin = file(s).absoluteFile.invariantSeparatorsPath
+    val drive2 = Regex("^([A-Za-z]):/(.*)$").matchEntire(absWin)
+        ?: return absWin
+    return "/mnt/${drive2.groupValues[1].lowercase()}/${drive2.groupValues[2]}"
 }
 
-tasks.register<Exec>("createStrippedConfigRegistry") {
+fun Project.normalizeFsPath(path: String): String {
+    return if (isWindowsHost) toWslPath(path) else {
+        val s = path.replace('\\', '/')
+        val drive = Regex("^([A-Za-z]):/(.*)$").matchEntire(s)
+        if (drive != null) {
+            return "/mnt/${drive.groupValues[1].lowercase()}/${drive.groupValues[2]}"
+        }
+        val unc = Regex("^//wsl(?:\\.localhost|\\$)/([^/]+)/(.*)$").matchEntire(s)
+        if (unc != null) {
+            return "/" + unc.groupValues[2]
+        }
+        if (s.startsWith("/")) {
+            return s
+        }
+        file(s).absoluteFile.invariantSeparatorsPath
+    }
+}
+
+fun Project.mobileConfigCmd(input: String, output: String): List<String> {
+    val script = normalizeFsPath("$liboSrcRoot/android/mobile-config.py")
+    val inPath = normalizeFsPath(input)
+    val outPath = normalizeFsPath(output)
+    return if (isWindowsHost) {
+        val distro = (findProperty("wsl.distro") as String?) ?: "LibreOfficeBuildUbuntu"
+        listOf("wsl.exe", "-d", distro, "--", "python3", script, inPath, outPath)
+    } else {
+        listOf("python3", script, inPath, outPath)
+    }
+}
+
+fun runMobileConfigProcess(cmd: List<String>, workDir: File, logger: org.gradle.api.logging.Logger) {
+    val proc = ProcessBuilder(cmd)
+        .directory(workDir)
+        .redirectErrorStream(true)
+        .start()
+    val log = proc.inputStream.bufferedReader().readText()
+    val code = proc.waitFor()
+    if (log.isNotBlank()) {
+        logger.lifecycle(log.trimEnd())
+    }
+    if (code != 0) {
+        throw GradleException("mobile-config.py failed with exit code $code")
+    }
+}
+
+tasks.register("createStrippedConfigMain") {
     dependsOn("createStrippedConfig")
-    inputs.files("$liboInstdir/share/registry/res/registry_en-US.xcd", "$liboSrcRoot/android/mobile-config.py")
-    outputs.file("assets_strippedUI/share/registry/res/registry_en-US.xcd")
-    executable = "$liboSrcRoot/android/mobile-config.py"
-    args("$liboInstdir/share/registry/res/registry_en-US.xcd", "assets_strippedUI/share/registry/res/registry_en-US.xcd")
-    doFirst {
+    val input = "$liboInstdir/share/registry/main.xcd"
+    val output = "assets_strippedUI/share/registry/main.xcd"
+    inputs.files(input, "$liboSrcRoot/android/mobile-config.py")
+    outputs.file(output)
+    val cmd = mobileConfigCmd(input, output)
+    val workDir = projectDir
+    doLast {
+        runMobileConfigProcess(cmd, workDir, logger)
+    }
+}
+
+tasks.register("createStrippedConfigRegistry") {
+    dependsOn("createStrippedConfig")
+    val input = "$liboInstdir/share/registry/res/registry_en-US.xcd"
+    val output = "assets_strippedUI/share/registry/res/registry_en-US.xcd"
+    inputs.files(input, "$liboSrcRoot/android/mobile-config.py")
+    outputs.file(output)
+    val cmd = mobileConfigCmd(input, output)
+    val workDir = projectDir
+    doLast {
         file("assets_strippedUI/share/registry/res").mkdirs()
+        runMobileConfigProcess(cmd, workDir, logger)
     }
 }
 
@@ -345,3 +432,4 @@ tasks.preBuild {
 tasks.clean {
     dependsOn("cleanCopyAssets", "cleanCreateStrippedConfig")
 }
+

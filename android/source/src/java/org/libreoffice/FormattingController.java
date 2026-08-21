@@ -11,6 +11,8 @@ import android.net.Uri;
 import android.os.Environment;
 import android.provider.MediaStore;
 import com.google.android.material.snackbar.Snackbar;
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.core.content.FileProvider;
 import android.util.Log;
 import android.view.LayoutInflater;
@@ -34,15 +36,31 @@ import static org.libreoffice.SearchController.addProperty;
 
 class FormattingController implements View.OnClickListener {
     private static final String LOGTAG = ToolbarController.class.getSimpleName();
-    private static final int TAKE_PHOTO = 1;
-    private static final int SELECT_PHOTO = 2;
     private static final int IMAGE_BUFFER_SIZE = 4 * 1024;
 
     private final LibreOfficeMainActivity mContext;
+    private final ActivityResultLauncher<Intent> mSelectPhotoLauncher;
+    private final ActivityResultLauncher<Intent> mTakePhotoLauncher;
     private String mCurrentPhotoPath;
 
     FormattingController(LibreOfficeMainActivity context) {
         mContext = context;
+
+        mSelectPhotoLauncher = mContext.registerForActivityResult(
+                new ActivityResultContracts.StartActivityForResult(), result -> {
+                    if (result.getResultCode() == Activity.RESULT_OK && result.getData() != null) {
+                        getFileFromURI(result.getData().getData());
+                        compressAndInsertImage();
+                    }
+                    mContext.hideBottomToolbar();
+                });
+        mTakePhotoLauncher = mContext.registerForActivityResult(
+                new ActivityResultContracts.StartActivityForResult(), result -> {
+                    if (result.getResultCode() == Activity.RESULT_OK) {
+                        compressAndInsertImage();
+                    }
+                    mContext.hideBottomToolbar();
+                });
 
         mContext.findViewById(R.id.button_insertFormatListBullets).setOnClickListener(this);
         mContext.findViewById(R.id.button_insertFormatListNumbering).setOnClickListener(this);
@@ -353,8 +371,8 @@ class FormattingController implements View.OnClickListener {
     private void sendImagePickingIntent() {
         Intent intent = new Intent(Intent.ACTION_PICK);
         intent.setType("image/*");
-        mContext.startActivityForResult(Intent.createChooser(intent,
-                mContext.getResources().getString(R.string.select_photo_title)), SELECT_PHOTO);
+        mSelectPhotoLauncher.launch(Intent.createChooser(intent,
+                mContext.getResources().getString(R.string.select_photo_title)));
     }
 
     private void dispatchTakePictureIntent() {
@@ -376,16 +394,7 @@ class FormattingController implements View.OnClickListener {
             Uri photoURI = FileProvider.getUriForFile(mContext,
                     mContext.getPackageName() + ".fileprovider", photoFile);
             takePictureIntent.putExtra(MediaStore.EXTRA_OUTPUT, photoURI);
-            mContext.startActivityForResult(takePictureIntent, TAKE_PHOTO);
-        }
-    }
-
-    void handleActivityResult(int requestCode, int resultCode, Intent data) {
-        if (requestCode == TAKE_PHOTO && resultCode == Activity.RESULT_OK) {
-            compressAndInsertImage();
-        } else if (requestCode == SELECT_PHOTO && resultCode == Activity.RESULT_OK) {
-            getFileFromURI(data.getData());
-            compressAndInsertImage();
+            mTakePhotoLauncher.launch(takePictureIntent);
         }
     }
 
@@ -486,3 +495,4 @@ class FormattingController implements View.OnClickListener {
         return image;
     }
 }
+

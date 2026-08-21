@@ -265,7 +265,9 @@ public abstract class ComposedTileLayer extends Layer implements ComponentCallba
     }
 
     @Override
+    @SuppressWarnings("deprecation")
     public void onLowMemory() {
+        // Required by ComponentCallbacks; prefer onTrimMemory on modern Android.
         Log.i(LOGTAG, "onLowMemory");
     }
 
@@ -278,3 +280,4 @@ public abstract class ComposedTileLayer extends Layer implements ComponentCallba
         }
     }
 }
+

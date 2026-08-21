@@ -22,9 +22,12 @@ import android.os.Bundle;
 import com.google.android.material.floatingactionbutton.FloatingActionButton;
 
 import androidx.activity.OnBackPressedCallback;
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsCompat;
+import androidx.core.view.WindowInsetsControllerCompat;
 import androidx.core.graphics.Insets;
 import androidx.appcompat.app.ActionBar;
 import androidx.appcompat.app.AppCompatActivity;
@@ -121,7 +124,12 @@ public class LibreOfficeUIActivity extends AppCompatActivity implements View.OnC
             "image/svg+xml",
     };
 
-    private static final int REQUEST_CODE_OPEN_FILECHOOSER = 12345;
+    private final ActivityResultLauncher<Intent> mOpenDocumentLauncher =
+            registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
+                if (result.getResultCode() == RESULT_OK && result.getData() != null) {
+                    openDocument(result.getData().getData());
+                }
+            });
 
     private Animation fabOpenAnimation;
     private Animation fabCloseAnimation;
@@ -145,10 +153,9 @@ public class LibreOfficeUIActivity extends AppCompatActivity implements View.OnC
         super.onCreate(savedInstanceState);
         WindowCompat.setDecorFitsSystemWindows(getWindow(), true);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            Window window = getWindow();
-            View decorView = window.getDecorView();
-            int systemUiVisibility = decorView.getSystemUiVisibility() | View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
-            decorView.setSystemUiVisibility(systemUiVisibility);
+            WindowInsetsControllerCompat insetsController =
+                    WindowCompat.getInsetsController(getWindow(), getWindow().getDecorView());
+            insetsController.setAppearanceLightStatusBars(true);
         }
 
         // init UI
@@ -230,7 +237,7 @@ public class LibreOfficeUIActivity extends AppCompatActivity implements View.OnC
     }
 
     private void expandFabMenu() {
-        ViewCompat.animate(editFAB).rotation(45.0F).withLayer().setDuration(300).setInterpolator(new OvershootInterpolator(10.0F)).start();
+        editFAB.animate().rotation(45.0F).setDuration(300).setInterpolator(new OvershootInterpolator(10.0F)).start();
         drawLayout.startAnimation(fabOpenAnimation);
         impressLayout.startAnimation(fabOpenAnimation);
         writerLayout.startAnimation(fabOpenAnimation);
@@ -266,7 +273,7 @@ public class LibreOfficeUIActivity extends AppCompatActivity implements View.OnC
     }
 
     private void collapseFabMenu() {
-        ViewCompat.animate(editFAB).rotation(0.0F).withLayer().setDuration(300).setInterpolator(new OvershootInterpolator(10.0F)).start();
+        editFAB.animate().rotation(0.0F).setDuration(300).setInterpolator(new OvershootInterpolator(10.0F)).start();
         writerLayout.startAnimation(fabCloseAnimation);
         impressLayout.startAnimation(fabCloseAnimation);
         drawLayout.startAnimation(fabCloseAnimation);
@@ -278,22 +285,13 @@ public class LibreOfficeUIActivity extends AppCompatActivity implements View.OnC
         isFabMenuOpen = false;
     }
 
-    @Override
-    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
-        super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode == REQUEST_CODE_OPEN_FILECHOOSER && resultCode == RESULT_OK) {
-            final Uri fileUri = data.getData();
-            openDocument(fileUri);
-        }
-    }
-
     private void showSystemFilePickerAndOpenFile() {
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         intent.setType("*/*");
         intent.putExtra(Intent.EXTRA_MIME_TYPES, SUPPORTED_MIME_TYPES);
 
         try {
-            startActivityForResult(intent, REQUEST_CODE_OPEN_FILECHOOSER);
+            mOpenDocumentLauncher.launch(intent);
         } catch (ActivityNotFoundException e) {
             Log.w(LOGTAG, "No activity available that can handle the intent to open a document.");
         }
@@ -476,3 +474,4 @@ public class LibreOfficeUIActivity extends AppCompatActivity implements View.OnC
 }
 
 /* vim:set shiftwidth=4 softtabstop=4 expandtab: */
+

@@ -16,6 +16,8 @@ import com.google.android.material.bottomsheet.BottomSheetBehavior;
 import com.google.android.material.snackbar.Snackbar;
 
 import androidx.activity.OnBackPressedCallback;
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.drawerlayout.widget.DrawerLayout;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.appcompat.widget.Toolbar;
@@ -63,11 +65,22 @@ public class LibreOfficeMainActivity extends AppCompatActivity implements Shared
     public static final String ENABLE_EXPERIMENTAL_PREFS_KEY = "ENABLE_EXPERIMENTAL";
     private static final String ASSETS_EXTRACTED_PREFS_KEY = "ASSETS_EXTRACTED";
     private static final String ENABLE_DEVELOPER_PREFS_KEY = "ENABLE_DEVELOPER";
-    private static final int REQUEST_CODE_SAVEAS = 12345;
-    private static final int REQUEST_CODE_EXPORT_TO_PDF = 12346;
-
     //TODO "public static" is a temporary workaround
     public static LOKitThread loKitThread;
+
+    private final ActivityResultLauncher<Intent> mSaveAsLauncher =
+            registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
+                if (result.getResultCode() == RESULT_OK && result.getData() != null) {
+                    saveDocumentAs(result.getData().getData());
+                }
+            });
+
+    private final ActivityResultLauncher<Intent> mExportPdfLauncher =
+            registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
+                if (result.getResultCode() == RESULT_OK && result.getData() != null) {
+                    exportToPDF(result.getData().getData());
+                }
+            });
 
     private GeckoLayerClient mLayerClient;
 
@@ -222,29 +235,7 @@ public class LibreOfficeMainActivity extends AppCompatActivity implements Shared
         }
 
         mToolbarController.setupToolbars();
-
-        TabHost host = findViewById(R.id.toolbarTabHost);
-        host.setup();
-
-        TabHost.TabSpec spec = host.newTabSpec(getString(R.string.tabhost_character));
-        spec.setContent(R.id.tab_character);
-        spec.setIndicator(getString(R.string.tabhost_character));
-        host.addTab(spec);
-
-        spec = host.newTabSpec(getString(R.string.tabhost_paragraph));
-        spec.setContent(R.id.tab_paragraph);
-        spec.setIndicator(getString(R.string.tabhost_paragraph));
-        host.addTab(spec);
-
-        spec = host.newTabSpec(getString(R.string.tabhost_insert));
-        spec.setContent(R.id.tab_insert);
-        spec.setIndicator(getString(R.string.tabhost_insert));
-        host.addTab(spec);
-
-        spec = host.newTabSpec(getString(R.string.tabhost_style));
-        spec.setContent(R.id.tab_style);
-        spec.setIndicator(getString(R.string.tabhost_style));
-        host.addTab(spec);
+        setupToolbarTabs();
 
         LinearLayout bottomToolbarLayout = findViewById(R.id.toolbar_bottom);
         LinearLayout toolbarColorPickerLayout = findViewById(R.id.toolbar_color_picker);
@@ -369,7 +360,7 @@ public class LibreOfficeMainActivity extends AppCompatActivity implements Shared
             intent.putExtra(DocumentsContract.EXTRA_INITIAL_URI, mDocumentUri);
         }
 
-        startActivityForResult(intent, REQUEST_CODE_SAVEAS);
+        mSaveAsLauncher.launch(intent);
     }
 
     /**
@@ -401,7 +392,7 @@ public class LibreOfficeMainActivity extends AppCompatActivity implements Shared
         final String suggestedFileName = FileUtilities.stripExtensionFromFileName(displayName) + ".pdf";
         intent.putExtra(Intent.EXTRA_TITLE, suggestedFileName);
 
-        startActivityForResult(intent, REQUEST_CODE_EXPORT_TO_PDF);
+        mExportPdfLauncher.launch(intent);
     }
 
     private void exportToPDF(final Uri uri) {
@@ -589,7 +580,7 @@ public class LibreOfficeMainActivity extends AppCompatActivity implements Shared
 
         if (layerView.requestFocus()) {
             InputMethodManager inputMethodManager = (InputMethodManager) getApplicationContext().getSystemService(Context.INPUT_METHOD_SERVICE);
-            inputMethodManager.showSoftInput(layerView, InputMethodManager.SHOW_FORCED);
+            inputMethodManager.showSoftInput(layerView, 0);
         }
         isKeyboardOpen=true;
         isSearchToolbarOpen=false;
@@ -1099,20 +1090,38 @@ public class LibreOfficeMainActivity extends AppCompatActivity implements Shared
         startActivity(intent);
     }
 
-    @Override
-    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
-        super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode == REQUEST_CODE_SAVEAS && resultCode == RESULT_OK) {
-            final Uri fileUri = data.getData();
-            saveDocumentAs(fileUri);
-        } else if (requestCode == REQUEST_CODE_EXPORT_TO_PDF && resultCode == RESULT_OK) {
-            final Uri fileUri = data.getData();
-            exportToPDF(fileUri);
-        } else {
-            mFormattingController.handleActivityResult(requestCode, resultCode, data);
-            hideBottomToolbar();
-        }
+    /**
+     * Bottom formatting toolbar still uses platform TabHost (deprecated).
+     * Full migration to TabLayout would require layout/UX rewrite; suppress for now.
+     */
+    @SuppressWarnings("deprecation")
+    private void setupToolbarTabs() {
+        TabHost host = findViewById(R.id.toolbarTabHost);
+        host.setup();
+
+        TabHost.TabSpec spec = host.newTabSpec(getString(R.string.tabhost_character));
+        spec.setContent(R.id.tab_character);
+        spec.setIndicator(getString(R.string.tabhost_character));
+        host.addTab(spec);
+
+        spec = host.newTabSpec(getString(R.string.tabhost_paragraph));
+        spec.setContent(R.id.tab_paragraph);
+        spec.setIndicator(getString(R.string.tabhost_paragraph));
+        host.addTab(spec);
+
+        spec = host.newTabSpec(getString(R.string.tabhost_insert));
+        spec.setContent(R.id.tab_insert);
+        spec.setIndicator(getString(R.string.tabhost_insert));
+        host.addTab(spec);
+
+        spec = host.newTabSpec(getString(R.string.tabhost_style));
+        spec.setContent(R.id.tab_style);
+        spec.setIndicator(getString(R.string.tabhost_style));
+        host.addTab(spec);
     }
+
+    // onActivityResult no longer needed for save/export/image pickers (Activity Result API).
 }
 
 /* vim:set shiftwidth=4 softtabstop=4 expandtab: */
+
