@@ -312,6 +312,12 @@ private:
     bool m_bAppLeftPaneVisible;
     sal_Int32 m_nAppLeftPaneWidth;
     css::uno::Reference<css::awt::XWindow> m_xAppLeftPaneWindow;
+    /** DocSkill nested SDI: the work-card document lives in a child window, so
+        neither implts_isFrameOrWindowTop() nor implts_isEmbeddedLayoutManager()
+        holds and createElement() refuses to build a status bar. Opt in per
+        frame instead of relaxing the gate for every non-top frame (OLE in-place
+        editing relies on it staying closed). */
+    bool m_bDocSkillNestedStatusBar;
 
     friend class detail::InfoHelperBuilder;
 };
@@ -319,3 +325,4 @@ private:
 } // namespace framework
 
 /* vim:set shiftwidth=4 softtabstop=4 expandtab: */
+

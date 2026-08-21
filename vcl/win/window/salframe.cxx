@@ -70,12 +70,14 @@
 #include <win/salmenu.h>
 #include <win/salobj.h>
 #include <win/saltimer.h>
+#include <docskillcaption.hxx>
 
 #include <helpwin.hxx>
 #include <window.h>
 #include <sallayout.hxx>
 
 #include <vector>
+#include <algorithm>
 
 #include <com/sun/star/uno/Exception.hpp>
 
@@ -257,6 +259,304 @@ enum PreferredAppMode
 #ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
 #define DWMWA_USE_IMMERSIVE_DARK_MODE 20
 #endif
+#ifndef DWMWA_CAPTION_COLOR
+#define DWMWA_CAPTION_COLOR 35
+#endif
+#ifndef DWMWA_TEXT_COLOR
+#define DWMWA_TEXT_COLOR 36
+#endif
+#ifndef DWMWA_CAPTION_BUTTON_BOUNDS
+#define DWMWA_CAPTION_BUTTON_BOUNDS 5
+#endif
+
+#include <uxtheme.h>
+#include <vssym32.h>
+#pragma comment(lib, "uxtheme.lib")
+
+static UINT DocSkillWindowDpi(HWND hWnd)
+{
+    using GetDpiForWindow_t = UINT (WINAPI*)(HWND);
+    static auto pFn = reinterpret_cast<GetDpiForWindow_t>(
+        GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow"));
+    if (pFn)
+        return pFn(hWnd);
+    return 96;
+}
+
+static int DocSkillFrameBorderPx(HWND hWnd)
+{
+    const UINT nDpi = DocSkillWindowDpi(hWnd);
+    return GetSystemMetricsForDpi(SM_CXFRAME, nDpi)
+           + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, nDpi);
+}
+
+/** Single-row caption chrome matching DWM system-button height (not stacked
+ *  title+menu). Tall chrome vertically centers title/menus below the buttons. */
+static int DocSkillCaptionHeightPx(HWND hWnd)
+{
+    const UINT nDpi = DocSkillWindowDpi(hWnd);
+    RECT aBtn{};
+    if (SUCCEEDED(DwmGetWindowAttribute(hWnd, DWMWA_CAPTION_BUTTON_BOUNDS, &aBtn, sizeof(aBtn)))
+        && aBtn.bottom > aBtn.top)
+    {
+        // Bounds are window-relative; use bottom so maximized top inset is kept.
+        int nH = aBtn.bottom;
+        if (nH < MulDiv(30, static_cast<int>(nDpi), 96))
+            nH = MulDiv(30, static_cast<int>(nDpi), 96);
+        return nH;
+    }
+    // Win10/11 caption buttons are taller than classic SM_CYCAPTION.
+    int nH = std::max(GetSystemMetricsForDpi(SM_CYCAPTION, nDpi),
+                       MulDiv(30, static_cast<int>(nDpi), 96));
+    if (IsZoomed(hWnd))
+        nH += DocSkillFrameBorderPx(hWnd);
+    return nH;
+}
+
+/** Client-right reserve so the VCL menubar never paints over DWM buttons.
+ *  Win11 cluster is ~146px @96dpi — NEVER fall back to 3*SM_CXSIZE (~54). */
+static int DocSkillCaptionButtonWidthPx(HWND hWnd)
+{
+    const UINT nDpi = DocSkillWindowDpi(hWnd);
+    const int nSafeFallback = MulDiv(150, static_cast<int>(nDpi), 96);
+    RECT aBtn{};
+    if (SUCCEEDED(DwmGetWindowAttribute(hWnd, DWMWA_CAPTION_BUTTON_BOUNDS, &aBtn, sizeof(aBtn)))
+        && aBtn.right > aBtn.left)
+    {
+        RECT aWin{};
+        GetWindowRect(hWnd, &aWin);
+        POINT aOrigin{ 0, 0 };
+        ClientToScreen(hWnd, &aOrigin);
+        const int nBtnLeftClient = aBtn.left - (aOrigin.x - aWin.left);
+        RECT aClient{};
+        GetClientRect(hWnd, &aClient);
+        const int nReserve = aClient.right - nBtnLeftClient;
+        // Trust DWM when it yields a plausible strip; never use tiny SM_CXSIZE*3.
+        if (nReserve >= MulDiv(80, static_cast<int>(nDpi), 96) && nReserve < aClient.right)
+        {
+            // Maximized Win11 sometimes reports a tight bound for one frame —
+            // keep a floor so the VCL menubar cannot cover the cluster.
+            if (IsZoomed(hWnd))
+                return std::max(nReserve, nSafeFallback);
+            return nReserve;
+        }
+        const int nBtnW = static_cast<int>(aBtn.right - aBtn.left)
+            + MulDiv(8, static_cast<int>(nDpi), 96);
+        return std::max(nBtnW, nSafeFallback);
+    }
+    return nSafeFallback;
+}
+
+static void ApplyDocSkillCaptionColor(HWND hWnd, bool bHideCaptionText = false)
+{
+    if (!hWnd)
+        return;
+    // Match DOC_SKILL_SHELL_BG (#F4F5F7) so the caption is the same chassis.
+    COLORREF caption = RGB(0xF4, 0xF5, 0xF7);
+    COLORREF text = bHideCaptionText ? caption : RGB(0x1A, 0x1A, 0x1A);
+    DwmSetWindowAttribute(hWnd, DWMWA_CAPTION_COLOR, &caption, sizeof(caption));
+    DwmSetWindowAttribute(hWnd, DWMWA_TEXT_COLOR, &text, sizeof(text));
+}
+
+static void DocSkillApplyCaptionMargins(HWND hWnd, bool bOn)
+{
+    if (!hWnd)
+        return;
+    // Re-entrancy guard: DwmExtendFrameIntoClientArea can synthesize SIZE /
+    // NCCALCSIZE which re-enters caption setup during fragile startup.
+    static bool bBusy = false;
+    if (bBusy)
+        return;
+    bBusy = true;
+    MARGINS aMargins{};
+    if (bOn)
+        aMargins.cyTopHeight = DocSkillCaptionHeightPx(hWnd);
+    DwmExtendFrameIntoClientArea(hWnd, &aMargins);
+    ApplyDocSkillCaptionColor(hWnd, bOn);
+    bBusy = false;
+}
+
+static void DocSkillPaintCaptionButtonsThemed(HWND hWnd, HDC hDC, const RECT& aBtnClient)
+{
+    if (!hWnd || !hDC || aBtnClient.right <= aBtnClient.left)
+        return;
+
+    HBRUSH hBrush = CreateSolidBrush(RGB(0xF4, 0xF5, 0xF7));
+    FillRect(hDC, &aBtnClient, hBrush);
+    DeleteObject(hBrush);
+
+    const int nTotal = aBtnClient.right - aBtnClient.left;
+    const int nThird = std::max(1, nTotal / 3);
+    RECT aMin{ aBtnClient.left, aBtnClient.top, aBtnClient.left + nThird, aBtnClient.bottom };
+    RECT aMax{ aMin.right, aBtnClient.top, aMin.right + nThird, aBtnClient.bottom };
+    RECT aClose{ aMax.right, aBtnClient.top, aBtnClient.right, aBtnClient.bottom };
+
+    HTHEME hTheme = OpenThemeData(hWnd, L"Window");
+    if (!hTheme)
+    {
+        // Fallback: GDI glyphs only if theme unavailable.
+        HPEN hPen = CreatePen(PS_SOLID, 1, RGB(0x1A, 0x1A, 0x1A));
+        HGDIOBJ hOld = SelectObject(hDC, hPen);
+        const int cy = (aBtnClient.top + aBtnClient.bottom) / 2;
+        MoveToEx(hDC, aMin.left + nThird / 2 - 5, cy, nullptr);
+        LineTo(hDC, aMin.left + nThird / 2 + 6, cy);
+        Rectangle(hDC, aMax.left + nThird / 2 - 5, cy - 5, aMax.left + nThird / 2 + 6, cy + 6);
+        MoveToEx(hDC, aClose.left + nThird / 2 - 5, cy - 5, nullptr);
+        LineTo(hDC, aClose.left + nThird / 2 + 6, cy + 6);
+        MoveToEx(hDC, aClose.left + nThird / 2 + 5, cy - 5, nullptr);
+        LineTo(hDC, aClose.left + nThird / 2 - 6, cy + 6);
+        SelectObject(hDC, hOld);
+        DeleteObject(hPen);
+        return;
+    }
+
+    const int nMaxPart = IsZoomed(hWnd) ? WP_RESTOREBUTTON : WP_MAXBUTTON;
+    DrawThemeBackground(hTheme, hDC, WP_MINBUTTON, MINBS_NORMAL, &aMin, nullptr);
+    DrawThemeBackground(hTheme, hDC, nMaxPart, MAXBS_NORMAL, &aMax, nullptr);
+    DrawThemeBackground(hTheme, hDC, WP_CLOSEBUTTON, CBS_NORMAL, &aClose, nullptr);
+    CloseThemeData(hTheme);
+}
+
+static void DocSkillPaintCaptionStrip(HWND hWnd, HDC hDC)
+{
+    if (!hWnd || !hDC)
+        return;
+    // CRITICAL: never FillRect the menubar band — that paints over the child
+    // MenuBarWindow and wipes title/menus (whiteboard title strip).
+    // CRITICAL: never FillRect into DWM caption-button bounds — that hides the
+    // native min/max/close glyphs (especially after document open / layout).
+    RECT aClient{};
+    GetClientRect(hWnd, &aClient);
+    const int nCapH = DocSkillCaptionHeightPx(hWnd);
+    if (nCapH <= 0)
+        return;
+    const int nBtnW = DocSkillCaptionButtonWidthPx(hWnd);
+    if (nBtnW <= 0)
+        return;
+
+    int nBtnLeft = aClient.right - nBtnW;
+    RECT aDwm{};
+    if (SUCCEEDED(DwmGetWindowAttribute(hWnd, DWMWA_CAPTION_BUTTON_BOUNDS, &aDwm, sizeof(aDwm)))
+        && aDwm.right > aDwm.left)
+    {
+        POINT aOrigin{ 0, 0 };
+        ClientToScreen(hWnd, &aOrigin);
+        RECT aWin{};
+        GetWindowRect(hWnd, &aWin);
+        const int nDwmLeft = aDwm.left - (aOrigin.x - aWin.left);
+        if (nDwmLeft > 0 && nDwmLeft < nBtnLeft)
+            nBtnLeft = nDwmLeft;
+    }
+
+    // Only fill a thin seam left of the button cluster (if any).
+    const int nGapLeft = nBtnLeft - 4;
+    if (nGapLeft <= 0 || nGapLeft >= nBtnLeft)
+        return;
+
+    RECT aGap{ nGapLeft, 0, nBtnLeft, nCapH };
+    HBRUSH hBrush = CreateSolidBrush(RGB(0xF4, 0xF5, 0xF7));
+    FillRect(hDC, &aGap, hBrush);
+    DeleteObject(hBrush);
+}
+
+static bool DocSkillClientInToggle(WinSalFrame* pFrame, POINT aPtClient, int nCapH)
+{
+    if (!pFrame || aPtClient.y < 0 || aPtClient.y >= nCapH || aPtClient.x < 0)
+        return false;
+    tools::Long nLeft = pFrame->mnDocSkillToggleHitLeft;
+    tools::Long nRight = pFrame->mnDocSkillToggleHitRight;
+    if (nRight <= nLeft)
+    {
+        nLeft = 0;
+        nRight = 52;
+    }
+    return aPtClient.x >= nLeft && aPtClient.x < nRight;
+}
+
+/** Arm title-bar sidebar toggle without SendMessage (Python reads via GetProp). */
+static void DocSkillArmSidebarToggle(WinSalFrame* pFrame)
+{
+    if (!pFrame)
+        return;
+    pFrame->mbDocSkillSidebarTogglePending = true;
+    if (pFrame->mhWnd)
+        SetPropW(pFrame->mhWnd, L"DocSkillSidebarToggle", reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(1)));
+}
+
+/** Map screen point to HTMINBUTTON / HTMAXBUTTON / HTCLOSE (0 = miss).
+ *  Used when DwmDefWindowProc returns FALSE for NCHITTEST — otherwise
+ *  DefWindowProc yields HTCLIENT over the extended caption and the buttons
+ *  look painted but never hover or click.
+ *
+ *  Hot path: no SendMessage (WM_GETTITLEBARINFOEX) — that re-enters the
+ *  frame WndProc during NCHITTEST and has caused intermittent heap crashes
+ *  at startup. */
+static LRESULT DocSkillCaptionButtonHit(HWND hWnd, POINT aPtScreen)
+{
+    RECT aBtnScreen{};
+    bool bHave = false;
+
+    RECT aBtn{};
+    if (SUCCEEDED(DwmGetWindowAttribute(hWnd, DWMWA_CAPTION_BUTTON_BOUNDS, &aBtn, sizeof(aBtn)))
+        && aBtn.right > aBtn.left)
+    {
+        RECT aWin{};
+        GetWindowRect(hWnd, &aWin);
+        aBtnScreen = {
+            aBtn.left + aWin.left,
+            aBtn.top + aWin.top,
+            aBtn.right + aWin.left,
+            aBtn.bottom + aWin.top,
+        };
+        bHave = true;
+    }
+
+    if (!bHave)
+    {
+        POINT aPt = aPtScreen;
+        ScreenToClient(hWnd, &aPt);
+        RECT aClient{};
+        GetClientRect(hWnd, &aClient);
+        const int nBtnW = DocSkillCaptionButtonWidthPx(hWnd);
+        const int nCapH = DocSkillCaptionHeightPx(hWnd);
+        if (aPt.y < 0 || aPt.y >= nCapH || aPt.x < aClient.right - nBtnW)
+            return 0;
+        POINT aOrigin{ 0, 0 };
+        ClientToScreen(hWnd, &aOrigin);
+        aBtnScreen = {
+            aOrigin.x + (aClient.right - nBtnW),
+            aOrigin.y,
+            aOrigin.x + aClient.right,
+            aOrigin.y + nCapH,
+        };
+        bHave = true;
+    }
+    if (!bHave || !PtInRect(&aBtnScreen, aPtScreen))
+        return 0;
+    const int nTotal = aBtnScreen.right - aBtnScreen.left;
+    const int nThird = std::max(1, nTotal / 3);
+    const int relX = aPtScreen.x - aBtnScreen.left;
+    if (relX < nThird)
+        return HTMINBUTTON;
+    if (relX < 2 * nThird)
+        return HTMAXBUTTON;
+    return HTCLOSE;
+}
+
+static bool DocSkillPostCaptionButtonSysCommand(HWND hWnd, LRESULT nHit)
+{
+    WPARAM nCmd = 0;
+    if (nHit == HTMINBUTTON)
+        nCmd = SC_MINIMIZE;
+    else if (nHit == HTMAXBUTTON)
+        nCmd = IsZoomed(hWnd) ? SC_RESTORE : SC_MAXIMIZE;
+    else if (nHit == HTCLOSE)
+        nCmd = SC_CLOSE;
+    else
+        return false;
+    PostMessageW(hWnd, WM_SYSCOMMAND, nCmd, 0);
+    return true;
+}
 
 static void UpdateDarkMode(HWND hWnd)
 {
@@ -299,6 +599,11 @@ static void UpdateDarkMode(HWND hWnd)
         return;
 
     DwmSetWindowAttribute(hWnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &bDarkMode, sizeof(bDarkMode));
+    if (!bDarkMode)
+    {
+        WinSalFrame* pFrame = GetWindowPtr(hWnd);
+        ApplyDocSkillCaptionColor(hWnd, pFrame && pFrame->mbDocSkillCaptionMenu);
+    }
 }
 
 static void UpdateAutoAccel()
@@ -901,6 +1206,17 @@ WinSalFrame::WinSalFrame()
     mbPropertiesStored  = false;
     m_pTaskbarList3     = nullptr;
     maFirstPanGesturePt = POINT(0,0);
+    mbDocSkillCaptionMenu = false;
+    mbDocSkillSidebarTogglePending = false;
+    mbDocSkillCaptionSyncPending = false;
+    mbDocSkillCaptionSyncing = false;
+    mbDocSkillCaptionDwmOn = false;
+    mnDocSkillCaptionAppliedH = -1;
+    mbDocSkillCaptionZoomed = false;
+    mnDocSkillMenuHitLeft = 0;
+    mnDocSkillMenuHitRight = 0;
+    mnDocSkillToggleHitLeft = 0;
+    mnDocSkillToggleHitRight = 0;
 
     // get data, when making 1st frame
     if (pSalData->maFrames.empty())
@@ -1028,6 +1344,136 @@ void WinSalFrame::SetTitle( const OUString& rTitle )
     static_assert( sizeof( WCHAR ) == sizeof( sal_Unicode ), "must be the same size" );
 
     WinSalInstance::SendWndMessage(mhWnd, WM_SETTEXT, 0, reinterpret_cast<LPARAM>(rTitle.getStr()));
+    // Do not InvalidateRect the caption strip here — it floods WM_PAINT over
+    // DWM and can freeze the UI after a few title updates.
+}
+
+void WinSalFrame::SetDocSkillCaptionMenu(bool bOn)
+{
+    if (!mhWnd || !mbCaption || mbFloatWin || mbNoIcon)
+        return;
+    if (mnStyle & (SalFrameStyleFlags::DIALOG | SalFrameStyleFlags::TOOLTIP | SalFrameStyleFlags::INTRO
+                   | SalFrameStyleFlags::FLOAT | SalFrameStyleFlags::TOOLWINDOW))
+        return;
+    if (mbDocSkillCaptionMenu == bOn)
+        return;
+    mbDocSkillCaptionMenu = bOn;
+    ForceDocSkillCaptionSync();
+}
+
+/** Apply DWM caption merge safely.
+ *
+ *  Root cause of intermittent 0xC0000374 at splash / after maximize loops:
+ *  DwmExtendFrameIntoClientArea + SetWindowPos(SWP_FRAMECHANGED) synthesizes
+ *  nested WM_SIZE/NCCALCSIZE into this same WndProc. If WM_SIZE then posts
+ *  another caption sync that does another FRAMECHANGED, the frame geometry
+ *  recurses while VCL is mid-layout → heap corruption. Mitigations:
+ *   1. mbDocSkillCaptionSyncing: WM_SIZE must not request sync while we run
+ *   2. Full FRAMECHANGED only when turning DWM merge on/off (once)
+ *   3. Zoom/height tweaks: DwmExtend only — never SetWindowPos
+ */
+void WinSalFrame::SyncDocSkillCaptionFrame()
+{
+    mbDocSkillCaptionSyncPending = false;
+    if (!mhWnd || IsIconic(mhWnd) || mbDocSkillCaptionSyncing)
+        return;
+
+    const bool bOn = mbDocSkillCaptionMenu;
+    if (bOn && !IsWindowVisible(mhWnd))
+        return; // wait for Show; WM_SIZE will Force again
+
+    const int nWant = bOn ? DocSkillCaptionHeightPx(mhWnd) : 0;
+    const bool bZoomed = IsZoomed(mhWnd) != FALSE;
+
+    mbDocSkillCaptionSyncing = true;
+
+    if (bOn)
+    {
+        ::SetMenu(mhWnd, nullptr);
+        if (!mbDocSkillCaptionDwmOn)
+        {
+            // First enable: one Extend + one FRAMECHANGED, then never again
+            // unless caption is turned off.
+            DocSkillApplyCaptionMargins(mhWnd, true);
+            SetWindowPos(mhWnd, nullptr, 0, 0, 0, 0,
+                         SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER
+                             | SWP_NOACTIVATE);
+            mbDocSkillCaptionDwmOn = true;
+        }
+        else if (mnDocSkillCaptionAppliedH != nWant)
+        {
+            // Maximize/restore often changes caption-button bounds height.
+            // Update the glass margin only — no FRAMECHANGED (avoids nested SIZE).
+            DocSkillApplyCaptionMargins(mhWnd, true);
+        }
+        mnDocSkillCaptionAppliedH = nWant;
+        mbDocSkillCaptionZoomed = bZoomed;
+    }
+    else if (mbDocSkillCaptionDwmOn)
+    {
+        DocSkillApplyCaptionMargins(mhWnd, false);
+        SetWindowPos(mhWnd, nullptr, 0, 0, 0, 0,
+                     SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER
+                         | SWP_NOACTIVATE);
+        mbDocSkillCaptionDwmOn = false;
+        mnDocSkillCaptionAppliedH = -1;
+        mbDocSkillCaptionZoomed = false;
+    }
+
+    mbDocSkillCaptionSyncing = false;
+}
+
+void WinSalFrame::RequestDocSkillCaptionSync()
+{
+    if (!mhWnd || !mbDocSkillCaptionMenu || IsIconic(mhWnd) || mbDocSkillCaptionSyncing)
+        return;
+    if (mbDocSkillCaptionDwmOn
+        && mnDocSkillCaptionAppliedH == DocSkillCaptionHeightPx(mhWnd)
+        && mbDocSkillCaptionZoomed == (IsZoomed(mhWnd) != FALSE))
+        return;
+    if (mbDocSkillCaptionSyncPending)
+        return;
+    mbDocSkillCaptionSyncPending = true;
+    PostMessageW(mhWnd, SAL_MSG_DOCSKILL_CAPTION_SYNC, 0, 0);
+}
+
+void WinSalFrame::ForceDocSkillCaptionSync()
+{
+    if (!mhWnd || !mbDocSkillCaptionMenu || mbDocSkillCaptionSyncing)
+        return;
+    // Do not clear DwmOn — Force only refreshes margins/zoom after maximize.
+    // Clearing AppliedH lets Sync take the Extend-only branch when already on.
+    mnDocSkillCaptionAppliedH = -1;
+    if (mbDocSkillCaptionSyncPending)
+        return;
+    mbDocSkillCaptionSyncPending = true;
+    PostMessageW(mhWnd, SAL_MSG_DOCSKILL_CAPTION_SYNC, 0, 0);
+}
+
+tools::Long WinSalFrame::GetDocSkillCaptionMenuHeight() const
+{
+    if (!mbDocSkillCaptionMenu || !mhWnd)
+        return 0;
+    return DocSkillCaptionHeightPx(mhWnd);
+}
+
+tools::Long WinSalFrame::GetDocSkillCaptionButtonWidth() const
+{
+    if (!mbDocSkillCaptionMenu || !mhWnd)
+        return 0;
+    return DocSkillCaptionButtonWidthPx(mhWnd);
+}
+
+void WinSalFrame::SetDocSkillCaptionMenuHitRange(tools::Long nLeft, tools::Long nRight)
+{
+    mnDocSkillMenuHitLeft = nLeft;
+    mnDocSkillMenuHitRight = nRight;
+}
+
+void WinSalFrame::SetDocSkillCaptionToggleHitRange(tools::Long nLeft, tools::Long nRight)
+{
+    mnDocSkillToggleHitLeft = nLeft;
+    mnDocSkillToggleHitRight = nRight;
 }
 
 void WinSalFrame::SetIcon( sal_uInt16 nIcon )
@@ -4156,6 +4602,8 @@ static bool ImplHandlePaintMsg( HWND hWnd )
             // this information in the (deferred) paint
             BeginPaint( hWnd, &aPs );
             CopyRect( &aUpdateRect, &aPs.rcPaint );
+            if (pFrame->mbDocSkillCaptionMenu)
+                DocSkillPaintCaptionStrip(hWnd, aPs.hdc);
         }
 
         // reset clip region
@@ -5778,6 +6226,173 @@ static LRESULT CALLBACK SalFrameWndProc( HWND hWnd, UINT nMsg, WPARAM wParam, LP
         return 0;
     }
 
+    if (nMsg == SAL_MSG_DOCSKILL_CAPTION_MENU || nMsg == SAL_MSG_DOCSKILL_CAPTION_H
+        || nMsg == SAL_MSG_DOCSKILL_CAPTION_BTN || nMsg == SAL_MSG_DOCSKILL_CAPTION_HIT
+        || nMsg == SAL_MSG_DOCSKILL_SIDEBAR_TOGGLE
+        || nMsg == SAL_MSG_DOCSKILL_SIDEBAR_TOGGLE_PEEK
+        || nMsg == SAL_MSG_DOCSKILL_CAPTION_BTN_CLICK
+        || nMsg == SAL_MSG_DOCSKILL_CAPTION_SYNC
+        || nMsg == SAL_MSG_DOCSKILL_TOGGLE_HIT)
+    {
+        WinSalFrame* pCapFrame = GetWindowPtr(hWnd);
+        if (!pCapFrame)
+            return 0;
+        rDef = false;
+        if (nMsg == SAL_MSG_DOCSKILL_CAPTION_MENU)
+        {
+            pCapFrame->SetDocSkillCaptionMenu(wParam != 0);
+            return 0;
+        }
+        if (nMsg == SAL_MSG_DOCSKILL_CAPTION_SYNC)
+        {
+            pCapFrame->SyncDocSkillCaptionFrame();
+            return 0;
+        }
+        if (nMsg == SAL_MSG_DOCSKILL_CAPTION_BTN_CLICK)
+        {
+            if (wParam == 1)
+                PostMessageW(hWnd, WM_SYSCOMMAND, SC_MINIMIZE, 0);
+            else if (wParam == 2)
+                PostMessageW(hWnd, WM_SYSCOMMAND, IsZoomed(hWnd) ? SC_RESTORE : SC_MAXIMIZE, 0);
+            else if (wParam == 3)
+                PostMessageW(hWnd, WM_SYSCOMMAND, SC_CLOSE, 0);
+            return 0;
+        }
+        if (nMsg == SAL_MSG_DOCSKILL_SIDEBAR_TOGGLE)
+        {
+            DocSkillArmSidebarToggle(pCapFrame);
+            return 0;
+        }
+        if (nMsg == SAL_MSG_DOCSKILL_SIDEBAR_TOGGLE_PEEK)
+        {
+            if (!pCapFrame->mbDocSkillSidebarTogglePending)
+                return 0;
+            pCapFrame->mbDocSkillSidebarTogglePending = false;
+            if (hWnd)
+                RemovePropW(hWnd, L"DocSkillSidebarToggle");
+            return 1;
+        }
+        if (nMsg == SAL_MSG_DOCSKILL_CAPTION_H)
+            return pCapFrame->GetDocSkillCaptionMenuHeight();
+        if (nMsg == SAL_MSG_DOCSKILL_CAPTION_BTN)
+            return pCapFrame->GetDocSkillCaptionButtonWidth();
+        if (nMsg == SAL_MSG_DOCSKILL_TOGGLE_HIT)
+        {
+            pCapFrame->SetDocSkillCaptionToggleHitRange(static_cast<tools::Long>(wParam),
+                                                         static_cast<tools::Long>(lParam));
+            return 0;
+        }
+        pCapFrame->SetDocSkillCaptionMenuHitRange(static_cast<tools::Long>(wParam),
+                                                   static_cast<tools::Long>(lParam));
+        return 0;
+    }
+
+    if (nMsg == WM_NCCALCSIZE || nMsg == WM_NCHITTEST)
+    {
+        WinSalFrame* pCapFrame = GetWindowPtr(hWnd);
+        if (pCapFrame && pCapFrame->mbDocSkillCaptionMenu)
+        {
+            if (nMsg == WM_NCCALCSIZE && wParam)
+            {
+                auto* pParams = reinterpret_cast<NCCALCSIZE_PARAMS*>(lParam);
+                if (IsZoomed(hWnd))
+                {
+                    RECT aWork{};
+                    ImplSalGetWorkArea(hWnd, &aWork, nullptr);
+                    pParams->rgrc[0] = aWork;
+                }
+                else
+                {
+                    const int nBorder = DocSkillFrameBorderPx(hWnd);
+                    pParams->rgrc[0].left += nBorder;
+                    pParams->rgrc[0].right -= nBorder;
+                    pParams->rgrc[0].bottom -= nBorder;
+                }
+                rDef = false;
+                return 0;
+            }
+            if (nMsg == WM_NCHITTEST)
+            {
+                POINT aPtScreen{
+                    static_cast<LONG>(static_cast<short>(LOWORD(lParam))),
+                    static_cast<LONG>(static_cast<short>(HIWORD(lParam))) };
+                // Native Win10/11 caption buttons: DwmDefWindowProc must own
+                // hit-test first (hover/press chrome).
+                LRESULT nDwm = 0;
+                if (DwmDefWindowProc(hWnd, nMsg, wParam, lParam, &nDwm))
+                {
+                    rDef = false;
+                    return nDwm;
+                }
+                // DwmDefWindowProc often returns FALSE on Win11 custom frames.
+                // Without an explicit HTMIN/MAX/CLOSE here, DefWindowProc yields
+                // HTCLIENT over the extended caption → buttons look dead.
+                if (const LRESULT nBtn = DocSkillCaptionButtonHit(hWnd, aPtScreen))
+                {
+                    rDef = false;
+                    return nBtn;
+                }
+                POINT aPt = aPtScreen;
+                ScreenToClient(hWnd, &aPt);
+                RECT aClient{};
+                GetClientRect(hWnd, &aClient);
+                const int nBorder = DocSkillFrameBorderPx(hWnd);
+                const int nCapH = DocSkillCaptionHeightPx(hWnd);
+                const int nBtnW = DocSkillCaptionButtonWidthPx(hWnd);
+                // Keep HTCAPTION so the click arrives as WM_NCLBUTTONDOWN.
+                if (DocSkillClientInToggle(pCapFrame, aPt, nCapH))
+                {
+                    rDef = false;
+                    return HTCAPTION;
+                }
+                if (!IsZoomed(hWnd) && aPt.y >= 0 && aPt.y < nBorder
+                    && aPt.x >= 0 && aPt.x < aClient.right)
+                {
+                    rDef = false;
+                    return HTTOP;
+                }
+                // Never claim HTCLIENT over the system-button reserve.
+                if (aPt.y >= 0 && aPt.y < nCapH && aPt.x >= 0
+                    && aPt.x < aClient.right - nBtnW)
+                {
+                    rDef = false;
+                    if (aPt.x >= pCapFrame->mnDocSkillMenuHitLeft
+                        && aPt.x < pCapFrame->mnDocSkillMenuHitRight)
+                        return HTCLIENT;
+                    return HTCAPTION;
+                }
+                // Right of menubar but somehow missed button hit — still try
+                // the button map; never fall back to HTCAPTION over the strip
+                // (that makes buttons look dead and steals double-clicks).
+                if (aPt.y >= 0 && aPt.y < nCapH && aPt.x >= aClient.right - nBtnW)
+                {
+                    if (const LRESULT nBtn2 = DocSkillCaptionButtonHit(hWnd, aPtScreen))
+                    {
+                        rDef = false;
+                        return nBtn2;
+                    }
+                    rDef = false;
+                    return HTNOWHERE;
+                }
+            }
+        }
+    }
+
+    // DWM requires NCMOUSELEAVE or hover highlight sticks on caption buttons.
+    if (nMsg == WM_NCMOUSELEAVE)
+    {
+        WinSalFrame* pLeave = GetWindowPtr(hWnd);
+        if (pLeave && pLeave->mbDocSkillCaptionMenu)
+        {
+            LRESULT nDwm = 0;
+            if (DwmDefWindowProc(hWnd, nMsg, wParam, lParam, &nDwm))
+            {
+                rDef = false;
+                return nDwm;
+            }
+        }
+    }
+
     ImplSVData* pSVData = ImplGetSVData();
     // #i72707# TODO: the mbDeInit check will not be needed
     // once all windows that are not properly closed on exit got fixed
@@ -5805,17 +6420,134 @@ static LRESULT CALLBACK SalFrameWndProc( HWND hWnd, UINT nMsg, WPARAM wParam, LP
         case WM_RBUTTONUP:
         case WM_NCMOUSEMOVE:
         case SAL_MSG_MOUSELEAVE:
+            if (nMsg == WM_NCMOUSEMOVE)
+            {
+                WinSalFrame* pNcMove = GetWindowPtr(hWnd);
+                if (pNcMove && pNcMove->mbDocSkillCaptionMenu)
+                {
+                    LRESULT nDwm = 0;
+                    if (DwmDefWindowProc(hWnd, nMsg, wParam, lParam, &nDwm))
+                    {
+                        rDef = false;
+                        nRet = nDwm;
+                        break;
+                    }
+                }
+            }
+            if (nMsg == WM_MOUSEMOVE || nMsg == WM_LBUTTONDOWN || nMsg == WM_LBUTTONUP)
+            {
+                // Fallback when hit-test briefly returns HTCLIENT over buttons
+                // (child HWND / race): drive DWM hover + SYSCOMMAND ourselves.
+                WinSalFrame* pCli = GetWindowPtr(hWnd);
+                if (pCli && pCli->mbDocSkillCaptionMenu)
+                {
+                    POINT aPt{
+                        static_cast<LONG>(static_cast<short>(LOWORD(lParam))),
+                        static_cast<LONG>(static_cast<short>(HIWORD(lParam))) };
+                    POINT aScreen = aPt;
+                    ClientToScreen(hWnd, &aScreen);
+                    if (const LRESULT nBtn = DocSkillCaptionButtonHit(hWnd, aScreen))
+                    {
+                        if (nMsg == WM_MOUSEMOVE)
+                        {
+                            LRESULT nDwm = 0;
+                            const LPARAM nScreenLp = MAKELPARAM(
+                                static_cast<WORD>(aScreen.x), static_cast<WORD>(aScreen.y));
+                            DwmDefWindowProc(hWnd, WM_NCMOUSEMOVE,
+                                             static_cast<WPARAM>(nBtn), nScreenLp, &nDwm);
+                            rDef = false;
+                            nRet = 0;
+                            break;
+                        }
+                        if (nMsg == WM_LBUTTONDOWN
+                            && DocSkillPostCaptionButtonSysCommand(hWnd, nBtn))
+                        {
+                            rDef = false;
+                            nRet = 0;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (nMsg == WM_LBUTTONDOWN)
+            {
+                WinSalFrame* pLbFrame = GetWindowPtr(hWnd);
+                if (pLbFrame && pLbFrame->mbDocSkillCaptionMenu)
+                {
+                    POINT aPt{
+                        static_cast<LONG>(static_cast<short>(LOWORD(lParam))),
+                        static_cast<LONG>(static_cast<short>(HIWORD(lParam))) };
+                    if (DocSkillClientInToggle(pLbFrame, aPt, DocSkillCaptionHeightPx(hWnd)))
+                        DocSkillArmSidebarToggle(pLbFrame);
+                }
+            }
             ImplSalYieldMutexAcquireWithWait();
             rDef = !ImplHandleMouseMsg( hWnd, nMsg, wParam, lParam );
             ImplSalYieldMutexRelease();
             break;
 
         case WM_NCLBUTTONDOWN:
+        case WM_NCLBUTTONUP:
+        case WM_NCLBUTTONDBLCLK:
         case WM_NCMBUTTONDOWN:
         case WM_NCRBUTTONDOWN:
-            ImplSalYieldMutexAcquireWithWait();
-            ImplCallClosePopupsHdl( hWnd );   // close popups...
-            ImplSalYieldMutexRelease();
+            {
+                WinSalFrame* pNcFrame = GetWindowPtr(hWnd);
+                if (pNcFrame && pNcFrame->mbDocSkillCaptionMenu)
+                {
+                    const bool bCaptionBtn = (wParam == HTMINBUTTON || wParam == HTMAXBUTTON
+                                              || wParam == HTCLOSE);
+                    LRESULT nDwm = 0;
+                    // Always give DWM first crack (press/hover chrome).
+                    const bool bDwm = DwmDefWindowProc(hWnd, nMsg, wParam, lParam, &nDwm);
+                    if (bCaptionBtn && nMsg == WM_NCLBUTTONDOWN)
+                    {
+                        // Ensure minimize/maximize/close actually run even when
+                        // DwmDefWindowProc claims the message without acting.
+                        DocSkillPostCaptionButtonSysCommand(hWnd, static_cast<LRESULT>(wParam));
+                        rDef = false;
+                        nRet = bDwm ? nDwm : 0;
+                        ImplSalYieldMutexAcquireWithWait();
+                        ImplCallClosePopupsHdl(hWnd);
+                        ImplSalYieldMutexRelease();
+                        break;
+                    }
+                    if (bDwm)
+                    {
+                        rDef = false;
+                        nRet = nDwm;
+                        // Title-bar double-click maximize/restore goes through
+                        // DWM; force caption re-sync so the menubar cannot cover
+                        // the relocated button cluster.
+                        if (nMsg == WM_NCLBUTTONDBLCLK)
+                            pNcFrame->ForceDocSkillCaptionSync();
+                        break;
+                    }
+                    if (nMsg == WM_NCLBUTTONDOWN)
+                    {
+                        POINT aPtScreen{
+                            static_cast<LONG>(static_cast<short>(LOWORD(lParam))),
+                            static_cast<LONG>(static_cast<short>(HIWORD(lParam))) };
+                        POINT aPt = aPtScreen;
+                        ScreenToClient(hWnd, &aPt);
+                        const int nCapH = DocSkillCaptionHeightPx(hWnd);
+                        if (DocSkillClientInToggle(pNcFrame, aPt, nCapH))
+                        {
+                            DocSkillArmSidebarToggle(pNcFrame);
+                            rDef = false;
+                            nRet = 0;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (nMsg == WM_NCLBUTTONDOWN || nMsg == WM_NCMBUTTONDOWN
+                || nMsg == WM_NCRBUTTONDOWN)
+            {
+                ImplSalYieldMutexAcquireWithWait();
+                ImplCallClosePopupsHdl( hWnd );   // close popups...
+                ImplSalYieldMutexRelease();
+            }
             break;
 
         case WM_MOUSEACTIVATE:
@@ -5915,6 +6647,18 @@ static LRESULT CALLBACK SalFrameWndProc( HWND hWnd, UINT nMsg, WPARAM wParam, LP
             break;
         case WM_SIZE:
             ImplHandleSizeMsg(hWnd, wParam, lParam);
+            // Skip while Sync holds mbDocSkillCaptionSyncing — nested SIZE from
+            // SetWindowPos must not queue another FRAMECHANGED cycle.
+            if (WinSalFrame* pSizeFrame = GetWindowPtr(hWnd))
+            {
+                if (!pSizeFrame->mbDocSkillCaptionSyncing)
+                {
+                    if (wParam == SIZE_MAXIMIZED || wParam == SIZE_RESTORED)
+                        pSizeFrame->ForceDocSkillCaptionSync();
+                    else
+                        pSizeFrame->RequestDocSkillCaptionSync();
+                }
+            }
             rDef = false;
             break;
         case SAL_MSG_POSTCALLSIZE:
@@ -5928,8 +6672,13 @@ static LRESULT CALLBACK SalFrameWndProc( HWND hWnd, UINT nMsg, WPARAM wParam, LP
             break;
 
         case WM_ERASEBKGND:
-            nRet = 1;
-            rDef = false;
+            if (WinSalFrame* pEraseFrame = GetWindowPtr(hWnd);
+                pEraseFrame && pEraseFrame->mbDocSkillCaptionMenu)
+            {
+                DocSkillPaintCaptionStrip(hWnd, reinterpret_cast<HDC>(wParam));
+                nRet = 1;
+                rDef = false;
+            }
             break;
         case WM_PAINT:
             ImplHandlePaintMsg( hWnd );
@@ -6169,3 +6918,4 @@ bool ImplHandleGlobalMsg( HWND /*hWnd*/, UINT nMsg, WPARAM /*wParam*/, LPARAM /*
 }
 
 /* vim:set shiftwidth=4 softtabstop=4 expandtab: */
+

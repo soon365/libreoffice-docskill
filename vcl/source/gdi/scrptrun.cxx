@@ -147,8 +147,6 @@ const PairIndices gPairIndices;
 
 namespace vcl {
 
-const char ScriptRun::fgClassID=0;
-
 static bool sameScript(int32_t scriptOne, int32_t scriptTwo)
 {
     return scriptOne <= USCRIPT_INHERITED || scriptTwo <= USCRIPT_INHERITED || scriptOne == scriptTwo;
@@ -257,3 +255,4 @@ UBool ScriptRun::next()
 }
 
 }
+

@@ -83,6 +83,17 @@ public:
     sal_Int32               mnDisplay;              // Display used for Fullscreen, 0 is primary monitor
     bool                    mbPropertiesStored;     // has values stored in the window property store
     POINT                   maFirstPanGesturePt;    // has value stores the start point of the panning gesture
+    bool                    mbDocSkillCaptionMenu;  // menubar lives in the caption strip
+    bool                    mbDocSkillSidebarTogglePending;
+    bool                    mbDocSkillCaptionSyncPending;
+    bool                    mbDocSkillCaptionSyncing;   // re-entrancy: inside Sync
+    bool                    mbDocSkillCaptionDwmOn;     // DwmExtend currently applied
+    int                     mnDocSkillCaptionAppliedH; // last extended frame height (-1 = none)
+    bool                    mbDocSkillCaptionZoomed;   // zoom state of that height
+    tools::Long             mnDocSkillMenuHitLeft;
+    tools::Long             mnDocSkillMenuHitRight;
+    tools::Long             mnDocSkillToggleHitLeft;
+    tools::Long             mnDocSkillToggleHitRight;
 
     void updateScreenNumber();
 
@@ -142,6 +153,15 @@ public:
     virtual bool                GetUseDarkMode() const override;
     virtual bool                GetUseReducedAnimation() const override;
 
+    void                        SetDocSkillCaptionMenu(bool bOn);
+    void                        SyncDocSkillCaptionFrame();
+    void                        RequestDocSkillCaptionSync();
+    void                        ForceDocSkillCaptionSync();
+    tools::Long                 GetDocSkillCaptionMenuHeight() const;
+    tools::Long                 GetDocSkillCaptionButtonWidth() const;
+    void                        SetDocSkillCaptionMenuHitRange(tools::Long nLeft, tools::Long nRight);
+    void                        SetDocSkillCaptionToggleHitRange(tools::Long nLeft, tools::Long nRight);
+
     constexpr vcl::WindowState state() const { return m_eState; }
     void SetMaximizedFrameGeometry(HWND hWnd, RECT* pParentRect = nullptr);
     void UpdateFrameGeometry();
@@ -164,3 +184,4 @@ OUString getKeysReplacementName(std::u16string_view pLang, UINT nSymbol);
 }
 
 /* vim:set shiftwidth=4 softtabstop=4 expandtab: */
+

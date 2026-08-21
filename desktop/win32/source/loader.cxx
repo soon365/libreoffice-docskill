@@ -204,6 +204,13 @@ namespace desktop_win32 {
 
 int officeloader_impl(bool bAllowConsole)
 {
+    // Force software Skia — Vulkan hard-fails (0xC0000409) on this machine.
+    {
+        wchar_t buf[32]{};
+        if (GetEnvironmentVariableW(L"SAL_SKIA", buf, 32) == 0)
+            SetEnvironmentVariableW(L"SAL_SKIA", L"raster");
+    }
+
     const auto& [szTargetFileName, szIniDirectory] = extendLoaderEnvironment();
 
     STARTUPINFOW aStartupInfo{ .cb = sizeof(aStartupInfo) };
@@ -311,6 +318,7 @@ int officeloader_impl(bool bAllowConsole)
             SetEnvironmentVariableW(L"ATTACHED_PARENT_PROCESSID", szParentProcessId);
     }
 
+    int nHeapRetries = 0;
     do
     {
         WCHAR* p = commandLineAppend(lpCommandLine, aEscapedArgs[0]);
@@ -358,6 +366,14 @@ int officeloader_impl(bool bAllowConsole)
 
             dwExitCode = 0;
             GetExitCodeProcess(aProcessInfo.hProcess, &dwExitCode);
+
+            // Single retry only if a residual race remains. Splash flash = root
+            // failure — keep at most one attempt.
+            if (dwExitCode == 0xC0000374 && nHeapRetries < 1)
+            {
+                ++nHeapRetries;
+                dwExitCode = EXITHELPER_CRASH_WITH_RESTART;
+            }
 
             CloseHandle(aProcessInfo.hProcess);
             CloseHandle(aProcessInfo.hThread);
@@ -441,3 +457,4 @@ int unopkgloader_impl(bool bAllowConsole)
 }
 
 /* vim:set shiftwidth=4 softtabstop=4 expandtab: */
+

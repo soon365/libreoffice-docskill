@@ -66,7 +66,9 @@ enum class LayoutManagerPropHandle
     DocSkillAppLeftPaneVisible,
     DocSkillAppLeftPaneWidth,
     DocSkillAppLeftPaneWindow,
-    LAST = DocSkillAppLeftPaneWindow
+    // DocSkill: opt in to a status bar on a nested (non-top) SDI frame
+    DocSkillNestedStatusBar,
+    LAST = DocSkillNestedStatusBar
 };
 
 inline constexpr o3tl::enumarray<LayoutManagerPropHandle, OUString> LayoutManagerPropNames =
@@ -83,7 +85,8 @@ inline constexpr o3tl::enumarray<LayoutManagerPropHandle, OUString> LayoutManage
     u"DocSkillAppRightPaneWindow"_ustr,
     u"DocSkillAppLeftPaneVisible"_ustr,
     u"DocSkillAppLeftPaneWidth"_ustr,
-    u"DocSkillAppLeftPaneWindow"_ustr
+    u"DocSkillAppLeftPaneWindow"_ustr,
+    u"DocSkillNestedStatusBar"_ustr
 };
 
 /** properties for "UICommandDescription" class */
@@ -163,3 +166,4 @@ class PropHelper
 } // namespace framework
 
 /* vim:set shiftwidth=4 softtabstop=4 expandtab: */
+

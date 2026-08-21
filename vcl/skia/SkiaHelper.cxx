@@ -268,7 +268,10 @@ static RenderMethod initRenderMethodToUse()
     }
     if (officecfg::Office::Common::VCL::ForceSkiaRaster::get())
         return RenderRaster;
-#if defined SK_METAL
+#if defined(_WIN32)
+    // Keep software Skia on Windows — Vulkan exits 0xC0000409 on this GPU.
+    return RenderRaster;
+#elif defined SK_METAL
     return RenderMetal;
 #elif defined SK_VULKAN
     return RenderVulkan;
@@ -954,3 +957,4 @@ void prefillSurface(const sk_sp<SkSurface>& surface)
 #endif // HAVE_FEATURE_SKIA
 
 /* vim:set shiftwidth=4 softtabstop=4 expandtab: */
+

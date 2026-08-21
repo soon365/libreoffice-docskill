@@ -75,6 +75,8 @@
 #include <sal/log.hxx>
 #include <o3tl/string_view.hxx>
 
+#include <vcl/syswin.hxx>
+#include <vcl/menu.hxx>
 #include <algorithm>
 
 //      using namespace
@@ -88,6 +90,94 @@ using namespace ::com::sun::star::ui;
 using namespace ::com::sun::star::frame;
 
 constexpr OUString STATUS_BAR_ALIAS = u"private:resource/statusbar/statusbar"_ustr;
+
+namespace
+{
+SystemWindow* lcl_topSystemWindow( vcl::Window* pWindow )
+{
+    SystemWindow* pTop = nullptr;
+    for ( vcl::Window* p = pWindow; p; p = p->GetParent() )
+    {
+        if ( p->IsSystemWindow() )
+            pTop = static_cast<SystemWindow*>( p );
+    }
+    return pTop;
+}
+
+bool lcl_nestedHostWindow( SystemWindow* pSysWindow )
+{
+    if ( !pSysWindow )
+        return false;
+    SystemWindow* pTop = lcl_topSystemWindow( pSysWindow );
+    return pTop && pTop != pSysWindow;
+}
+
+// DocSkill seamless shell — WorkBuddy-like surfaces (no hard divider lines).
+constexpr ::Color DOC_SKILL_SHELL_BG( 0xF4, 0xF5, 0xF7 );
+constexpr ::Color DOC_SKILL_SURFACE_LEFT( 0xFF, 0xFF, 0xFF );
+constexpr ::Color DOC_SKILL_SURFACE_MAIN( 0xFF, 0xFF, 0xFF );
+constexpr sal_Int32 DOC_SKILL_LEFT_ICON_RAIL = 48;
+constexpr sal_Int32 DOC_SKILL_CHROME_GAP = 8;
+
+void lcl_invalidateContainerChildrenExcept( vcl::Window* pContainer, vcl::Window* pSkip )
+{
+    if ( !pContainer )
+        return;
+    pContainer->Invalidate( InvalidateFlags::NoChildren );
+    for ( vcl::Window* pChild = pContainer->GetWindow( GetWindowType::FirstChild );
+          pChild; pChild = pChild->GetWindow( GetWindowType::Next ) )
+    {
+        if ( pChild != pSkip )
+            pChild->Invalidate( InvalidateFlags::Children );
+    }
+}
+
+void lcl_applyDocSkillShellSurfaces( vcl::Window* pContainer,
+                                     vcl::Window* pComponent,
+                                     vcl::Window* pLeftPane,
+                                     vcl::Window* pRightPane )
+{
+    if ( pContainer )
+    {
+        pContainer->SetBackground( Wallpaper( DOC_SKILL_SHELL_BG ) );
+        pContainer->SetPaintTransparent( false );
+    }
+    if ( pComponent )
+    {
+        pComponent->SetBackground( Wallpaper( DOC_SKILL_SURFACE_MAIN ) );
+        pComponent->SetPaintTransparent( false );
+    }
+    if ( pLeftPane )
+    {
+        // Native Win32 GDI paints the left rail; keep VCL transparent so
+        // doLayout Invalidate does not flash grey/white over the host HWND.
+        pLeftPane->SetBackground();
+        pLeftPane->SetPaintTransparent( true );
+    }
+    if ( pRightPane )
+    {
+        pRightPane->SetBackground( Wallpaper( DOC_SKILL_SURFACE_MAIN ) );
+        pRightPane->SetPaintTransparent( false );
+    }
+}
+
+void lcl_setHostMenuBar( SystemWindow* pSysWindow, MenuBar* pMenuBar )
+{
+    if ( !pSysWindow )
+        return;
+    // Nested SDI: one menubar on the workbench form. Document menus replace
+    // the StartModule bar; nested hide must not blank it (sleep/tab switch).
+    if ( lcl_nestedHostWindow( pSysWindow ) )
+    {
+        if ( !pMenuBar )
+            return;
+        if ( SystemWindow* pHost = lcl_topSystemWindow( pSysWindow ) )
+            pHost->SetMenuBar( pMenuBar );
+        return;
+    }
+    pSysWindow->SetMenuBar( pMenuBar );
+}
+}
 
 namespace framework
 {
@@ -125,6 +215,7 @@ LayoutManager::LayoutManager( const Reference< XComponentContext >& xContext ) :
         , m_nAppRightPaneWidth( 380 )
         , m_bAppLeftPaneVisible( false )
         , m_nAppLeftPaneWidth( 240 )
+        , m_bDocSkillNestedStatusBar( false )
 {
     // Initialize statusbar member
     m_aStatusBarElement.m_aType = "statusbar";
@@ -152,6 +243,7 @@ LayoutManager::LayoutManager( const Reference< XComponentContext >& xContext ) :
     registerProperty( LayoutManagerPropNames[LayoutManagerPropHandle::DocSkillAppLeftPaneVisible], static_cast<sal_Int32>(LayoutManagerPropHandle::DocSkillAppLeftPaneVisible), beans::PropertyAttribute::TRANSIENT, &m_bAppLeftPaneVisible, cppu::UnoType<decltype(m_bAppLeftPaneVisible)>::get() );
     registerProperty( LayoutManagerPropNames[LayoutManagerPropHandle::DocSkillAppLeftPaneWidth], static_cast<sal_Int32>(LayoutManagerPropHandle::DocSkillAppLeftPaneWidth), beans::PropertyAttribute::TRANSIENT, &m_nAppLeftPaneWidth, cppu::UnoType<decltype(m_nAppLeftPaneWidth)>::get() );
     registerProperty( LayoutManagerPropNames[LayoutManagerPropHandle::DocSkillAppLeftPaneWindow], static_cast<sal_Int32>(LayoutManagerPropHandle::DocSkillAppLeftPaneWindow), beans::PropertyAttribute::TRANSIENT | beans::PropertyAttribute::READONLY, &m_xAppLeftPaneWindow, cppu::UnoType<awt::XWindow>::get() );
+    registerProperty( LayoutManagerPropNames[LayoutManagerPropHandle::DocSkillNestedStatusBar], static_cast<sal_Int32>(LayoutManagerPropHandle::DocSkillNestedStatusBar), beans::PropertyAttribute::TRANSIENT, &m_bDocSkillNestedStatusBar, cppu::UnoType<decltype(m_bDocSkillNestedStatusBar)>::get() );
 }
 
 LayoutManager::~LayoutManager()
@@ -205,7 +297,7 @@ void LayoutManager::implts_createMenuBar(const OUString& rMenuBarName)
         MenuBar* pMenuBar = static_cast<MenuBar*>(pAwtMenuBar->GetMenu());
         if ( pMenuBar )
         {
-            pSysWindow->SetMenuBar(pMenuBar);
+            lcl_setHostMenuBar(pSysWindow, pMenuBar);
             pMenuBar->SetDisplayable( m_bMenuVisible );
             implts_updateMenuBarClose();
         }
@@ -253,7 +345,7 @@ void LayoutManager::impl_clearUpMenuBar()
 
             MenuBar* pTopMenuBar = pSysWindow->GetMenuBar();
             if ( pSetMenuBar == pTopMenuBar )
-                pSysWindow->SetMenuBar( nullptr );
+                lcl_setHostMenuBar( pSysWindow, nullptr );
         }
     }
 
@@ -834,7 +926,7 @@ void LayoutManager::implts_updateUIElementsVisibleState( bool bSetVisible )
         {
             if ( bSetVisible )
             {
-                pSysWindow->SetMenuBar(pMenuBar);
+                lcl_setHostMenuBar(pSysWindow, pMenuBar);
             }
 #ifdef MACOSX
             // Related: tdf#161623 don't set the menubar to null on macOS
@@ -860,10 +952,10 @@ void LayoutManager::implts_updateUIElementsVisibleState( bool bSetVisible )
             // So, we need to keep the menubar visible and rely on the vcl
             // code to disable all menu items.
             else if ( m_bInSetCurrentUIVisibility )
-                pSysWindow->SetMenuBar(pMenuBar);
+                lcl_setHostMenuBar(pSysWindow, pMenuBar);
 #endif
             else
-                pSysWindow->SetMenuBar( nullptr );
+                lcl_setHostMenuBar( pSysWindow, nullptr );
         }
     }
 
@@ -1242,7 +1334,7 @@ void LayoutManager::implts_setInplaceMenuBar( const Reference< XIndexAccess >& x
 
         SystemWindow* pSysWindow = getTopSystemWindow( m_xContainerWindow );
         if ( pSysWindow )
-            pSysWindow->SetMenuBar(pMenuBar);
+            lcl_setHostMenuBar(pSysWindow, pMenuBar);
 
         m_bInplaceMenuSet = true;
     }
@@ -1265,9 +1357,9 @@ void LayoutManager::implts_resetInplaceMenuBar()
         if ( pSysWindow )
         {
             if ( m_xMenuBar )
-                pSysWindow->SetMenuBar(static_cast<MenuBar *>(m_xMenuBar->GetMenuBarManager()->GetMenuBar()));
+                lcl_setHostMenuBar(pSysWindow, static_cast<MenuBar *>(m_xMenuBar->GetMenuBarManager()->GetMenuBar()));
             else
-                pSysWindow->SetMenuBar(nullptr);
+                lcl_setHostMenuBar(pSysWindow, nullptr);
         }
     }
 
@@ -1520,7 +1612,8 @@ void SAL_CALL LayoutManager::createElement( const OUString& aName )
             aWriteLock.clear();
         }
         else if ( aElementType.equalsIgnoreAsciiCase("statusbar") &&
-                  ( implts_isFrameOrWindowTop(xFrame) || implts_isEmbeddedLayoutManager() ))
+                  ( implts_isFrameOrWindowTop(xFrame) || implts_isEmbeddedLayoutManager()
+                    || m_bDocSkillNestedStatusBar ))
         {
             implts_createStatusBar( aName );
             bNotify = true;
@@ -2343,7 +2436,7 @@ bool LayoutManager::implts_doLayout( bool bForceRequestBorderSpace, bool bOuterR
         // card between them. Dock hosts MUST use setDockingAreaFrame with the
         // same width passed to doLayout — otherwise buttons pack for work
         // width inside a full-window dock (left clipped by nav, right blank).
-        constexpr sal_Int32 nChromeGap = 4;
+        constexpr sal_Int32 nChromeGap = DOC_SKILL_CHROME_GAP;
         sal_Int32 nLeft = 0;
         sal_Int32 nRight = 0;
         {
@@ -2353,12 +2446,18 @@ bool LayoutManager::implts_doLayout( bool bForceRequestBorderSpace, bool bOuterR
         }
         if ( nLeft > 0 )
         {
-            // AppLeftPane replaces LO's left docking strip (avoids a thin
-            // "staggered" sidebar seam between nav and the editor).
+            // Left rail sits on the chassis; one gap separates it from the work card.
             aBorderSpace.X = nLeft + nChromeGap;
         }
         if ( nRight > 0 )
-            aBorderSpace.Width += nRight;
+            aBorderSpace.Width += nRight + 2 * nChromeGap;
+        if ( nLeft > 0 || nRight > 0 )
+        {
+            // Top/bottom chassis band around the three cards. Geometry only —
+            // never create/show UI elements on this path (SolarMutex reentrancy).
+            aBorderSpace.Y += nChromeGap;
+            aBorderSpace.Height += nChromeGap;
+        }
 
         if ( !equalRectangles( aBorderSpace, aCurrBorderSpace ) || bForceRequestBorderSpace || bMustDoLayout )
         {
@@ -2413,13 +2512,10 @@ bool LayoutManager::implts_doLayout( bool bForceRequestBorderSpace, bool bOuterR
 
             const sal_Int32 nContainerW = static_cast<sal_Int32>( aContainerSize.Width() );
             const sal_Int32 nWorkX = ( nLeft > 0 ) ? ( nLeft + nChromeGap ) : 0;
-            sal_Int32 nWorkW = nContainerW - nWorkX - nRight;
-            // Start hero may claim nearly all remaining width (center collapses).
-            // Never steal space back from AppRightPane with a 200px floor.
+            const sal_Int32 nRightReserve = ( nRight > 0 ) ? ( nRight + 2 * nChromeGap ) : 0;
+            sal_Int32 nWorkW = nContainerW - nWorkX - nRightReserve;
             if ( nWorkW < 0 )
                 nWorkW = 0;
-            // Document chrome: keep a usable work card so bottom/top toolbars
-            // are never doLayout'd at width 0 (recovery left squashed icon rows).
             const bool bDocChrome = ( nLeft <= 0 && nRight > 0 && nRight <= 480 );
             if ( bDocChrome && nWorkW > 0 && nWorkW < 400 )
                 nWorkW = 400;
@@ -2427,14 +2523,11 @@ bool LayoutManager::implts_doLayout( bool bForceRequestBorderSpace, bool bOuterR
             implts_setOffset( aStatusBarSize.Height() );
             if ( m_xToolbarManager.is() )
             {
-                // Keep toolbar dock cache free of App pane widths (must not
-                // accumulate chrome into the next layout).
                 awt::Rectangle aToolbarDock( aDockSpace );
                 if ( nLeft > 0 )
-                    aToolbarDock.X = 0; // left dock suppressed — AppLeft owns it
+                    aToolbarDock.X = 0;
                 m_xToolbarManager->setDockingArea( aToolbarDock );
 
-                // Confine dock hosts to the work card; must match doLayout size.
                 if ( nWorkX > 0 || nRight > 0 )
                 {
                     m_xToolbarManager->setDockingAreaFrame(
@@ -2448,7 +2541,6 @@ bool LayoutManager::implts_doLayout( bool bForceRequestBorderSpace, bool bOuterR
                 m_xToolbarManager->doLayout( ::Size( nWorkW, aContainerSize.Height() ) );
             }
 
-            // Status bar shares the work-card left edge.
             if ( aStatusBarSize.Height() > 0 )
             {
                 implts_setStatusBarPosSize(
@@ -2474,11 +2566,14 @@ bool LayoutManager::implts_doLayout( bool bForceRequestBorderSpace, bool bOuterR
                 {
                 }
             }
-            // After chrome resize, force work-card/toolbars to repaint. Without
-            // this, zero-width intermediate layouts leave blank strips until a
-            // mouse click invalidates them.
+            // After chrome resize, force work-card/toolbars to repaint. Skip
+            // AppLeftPane: blanket Invalidate(Children) erases native Win32 GDI
+            // and leaves a grey flash until the host HWND repaints.
+            VclPtr<vcl::Window> pLeftSkip;
+            if ( m_xAppLeftPaneWindow.is() )
+                pLeftSkip = VCLUnoHelper::GetWindow( m_xAppLeftPaneWindow );
             if ( VclPtr<vcl::Window> pContainer = VCLUnoHelper::GetWindow( m_xContainerWindow ) )
-                pContainer->Invalidate( InvalidateFlags::Children );
+                lcl_invalidateContainerChildrenExcept( pContainer, pLeftSkip );
             if ( xComponentWindow.is() )
             {
                 if ( VclPtr<vcl::Window> pComp = VCLUnoHelper::GetWindow( xComponentWindow ) )
@@ -2510,6 +2605,20 @@ bool LayoutManager::implts_doLayout( bool bForceRequestBorderSpace, bool bOuterR
         implts_layoutAppRightPane();
     }
 
+    if ( implts_isDocSkillStickyChrome() && xContainerWindow.is() )
+    {
+        VclPtr<vcl::Window> pContainer = VCLUnoHelper::GetWindow( xContainerWindow );
+        VclPtr<vcl::Window> pComponent = xComponentWindow.is()
+            ? VCLUnoHelper::GetWindow( xComponentWindow ) : nullptr;
+        VclPtr<vcl::Window> pLeft;
+        VclPtr<vcl::Window> pRight;
+        if ( m_xAppLeftPaneWindow.is() )
+            pLeft = VCLUnoHelper::GetWindow( m_xAppLeftPaneWindow );
+        if ( m_xAppRightPaneWindow.is() )
+            pRight = VCLUnoHelper::GetWindow( m_xAppRightPaneWindow );
+        lcl_applyDocSkillShellSurfaces( pContainer, pComponent, pLeft, pRight );
+    }
+
     return bLayouted;
 }
 
@@ -2523,16 +2632,12 @@ sal_Int32 LayoutManager::implts_getAppRightPaneWidth() const
     if ( nWidth > 8192 )
         nWidth = 8192;
 
-    // Cap leftover start-hero width in document chrome. Left rail stays
-    // Visible=true with Width=0 (1px warm stub), so do NOT key off Visible —
-    // that skipped the cap and left right=1676 with nWorkW≈0 (blank toolbars
-    // until mouse invalidate).
-    const bool bStartModule =
-        m_aModuleIdentifier.endsWith( "StartModule" )
-        || m_aModuleIdentifier == "com.sun.star.frame.StartModule"
-        || m_aModuleIdentifier.isEmpty();
-    if ( !bStartModule && nWidth > 480 && m_nAppLeftPaneWidth <= 0 )
-        nWidth = 400;
+    // Hard cap: chat strip only. A leaked start-hero width (container−left)
+    // covers the center with start.html and leaves a white void — and repeated
+    // open/close + doLayout then corrupts chrome until crash.
+    constexpr sal_Int32 nChatCap = 480;
+    if ( nWidth > nChatCap )
+        nWidth = nChatCap;
 
     return nWidth;
 }
@@ -2614,15 +2719,6 @@ void LayoutManager::implts_layoutAppRightPane()
     if ( !m_xAppRightPaneWindow.is() || !m_xFrame.is() )
         return;
 
-    Reference< awt::XWindow > xComponentWindow;
-    try
-    {
-        xComponentWindow = m_xFrame->getComponentWindow();
-    }
-    catch ( const Exception& )
-    {
-    }
-
     try
     {
         // Always pin the right pane to the container's east edge.
@@ -2645,32 +2741,25 @@ void LayoutManager::implts_layoutAppRightPane()
         if ( nMaxPane > 0 && nPaneW > nMaxPane )
             nPaneW = nMaxPane;
 
-        // With a visible left rail, the hero/chat pane must start at nLeft —
-        // never leave a white gutter from a previous left=0 layout (CloseDoc).
-        sal_Int32 nX = ( nLeft > 0 ) ? nLeft : ( nContainerW - nPaneW );
-        if ( nLeft <= 0 )
+        // Always pin the pane to the container's east edge.
+        // Wide hero (pane ≈ container − left) still starts at nLeft.
+        // Narrow workbench chat must sit on the right: nav | document | AI.
+        // Old rule nX=nLeft with left rail visible put AI between nav and the
+        // document (the MDI MVP screenshot).
+        const sal_Int32 nGap = DOC_SKILL_CHROME_GAP;
+        sal_Int32 nX = nContainerW - nPaneW - nGap;
+        if ( nX < nLeft + nGap )
+            nX = nLeft + nGap;
+        if ( nX < 0 )
+            nX = 0;
+        if ( nX + nPaneW > nContainerW - nGap )
         {
-            if ( nX < 0 )
-                nX = 0;
-        }
-        else if ( nX + nPaneW > nContainerW )
-        {
-            nPaneW = nContainerW - nX;
+            nPaneW = nContainerW - nGap - nX;
             if ( nPaneW < 200 )
                 nPaneW = 200;
         }
-        const sal_Int32 nY = 0;
-        // Keep status-bar band clear so bottom toolbars are not covered/clipped.
-        const sal_Int32 nStatusH = implts_getStatusBarSize().Height();
-        sal_Int32 nH = std::max<sal_Int32>( nContainerH - std::max<sal_Int32>( nStatusH, 0 ), 200 );
-        if ( xComponentWindow.is() )
-        {
-            const awt::Rectangle aComp = xComponentWindow->getPosSize();
-            const sal_Int32 nCompBottom = aComp.Y + aComp.Height;
-            if ( nH < nCompBottom && nCompBottom <= nContainerH - nStatusH )
-                nH = nCompBottom;
-            nH = std::max<sal_Int32>( nH, 200 );
-        }
+        const sal_Int32 nY = nGap;
+        sal_Int32 nH = std::max<sal_Int32>( nContainerH - 2 * nGap, 200 );
 
         awt::Rectangle aOld( 0, 0, 0, 0 );
         try
@@ -2702,7 +2791,7 @@ void LayoutManager::implts_layoutAppRightPane()
         m_xAppRightPaneWindow->setVisible( true );
         if ( VclPtr<vcl::Window> pPane = VCLUnoHelper::GetWindow( m_xAppRightPaneWindow ) )
         {
-            pPane->SetBackground( Wallpaper( ::Color( 0xFF, 0xFF, 0xFF ) ) );
+            pPane->SetBackground( Wallpaper( DOC_SKILL_SURFACE_MAIN ) );
             pPane->SetPaintTransparent( false );
             // Wide hero may cover the center; narrow doc chat must NOT ToTop
             // over Writer toolbars (leaves unpainted white until click).
@@ -2716,7 +2805,7 @@ void LayoutManager::implts_layoutAppRightPane()
             std::ofstream stream( "C:\\docskill.ai\\apprightpane.txt", std::ios::app );
             stream << "layoutAppRightPane x=" << nX << " y=" << nY << " w=" << nPaneW
                    << " h=" << nH << " containerW=" << nContainerW << " left=" << nLeft
-                   << " hasComp=" << ( xComponentWindow.is() ? 1 : 0 ) << "\n";
+                   << "\n";
         }
         catch ( ... )
         {
@@ -2736,6 +2825,9 @@ sal_Int32 LayoutManager::implts_getAppLeftPaneWidth() const
     // start↔doc without Visible toggle flash).
     if ( m_nAppLeftPaneWidth <= 0 )
         return 0;
+    // Icon rail (WorkBuddy-style collapse): keep a narrow sticky nav strip.
+    if ( m_nAppLeftPaneWidth <= DOC_SKILL_LEFT_ICON_RAIL )
+        return DOC_SKILL_LEFT_ICON_RAIL;
     if ( m_nAppLeftPaneWidth < 160 )
         return 160;
     if ( m_nAppLeftPaneWidth > 400 )
@@ -2806,15 +2898,6 @@ void LayoutManager::implts_layoutAppLeftPane()
     if ( !m_xAppLeftPaneWindow.is() || !m_xFrame.is() )
         return;
 
-    Reference< awt::XWindow > xComponentWindow;
-    try
-    {
-        xComponentWindow = m_xFrame->getComponentWindow();
-    }
-    catch ( const Exception& )
-    {
-    }
-
     try
     {
         // Sticky left chrome — same anti-jitter rules as the right pane.
@@ -2826,16 +2909,7 @@ void LayoutManager::implts_layoutAppLeftPane()
 
         const sal_Int32 nX = 0;
         const sal_Int32 nY = 0;
-        const sal_Int32 nStatusH = implts_getStatusBarSize().Height();
-        sal_Int32 nH = std::max<sal_Int32>( nContainerH - std::max<sal_Int32>( nStatusH, 0 ), 200 );
-        if ( xComponentWindow.is() )
-        {
-            const awt::Rectangle aComp = xComponentWindow->getPosSize();
-            const sal_Int32 nCompBottom = aComp.Y + aComp.Height;
-            if ( nH < nCompBottom && nCompBottom <= nContainerH - nStatusH )
-                nH = nCompBottom;
-            nH = std::max<sal_Int32>( nH, 200 );
-        }
+        sal_Int32 nH = std::max<sal_Int32>( nContainerH, 200 );
 
         awt::Rectangle aOld( 0, 0, 0, 0 );
         try
@@ -2861,8 +2935,8 @@ void LayoutManager::implts_layoutAppLeftPane()
         m_xAppLeftPaneWindow->setVisible( true );
         if ( VclPtr<vcl::Window> pPane = VCLUnoHelper::GetWindow( m_xAppLeftPaneWindow ) )
         {
-            pPane->SetBackground( Wallpaper( ::Color( 0xF5, 0xF5, 0xF5 ) ) );
-            pPane->SetPaintTransparent( false );
+            pPane->SetBackground();
+            pPane->SetPaintTransparent( true );
             pPane->ToTop( ToTopFlags::NoGrabFocus );
         }
     }
@@ -3027,7 +3101,7 @@ bool LayoutManager::implts_resetMenuBar()
     SystemWindow* pSysWindow = getTopSystemWindow( xContainerWindow );
     if ( pSysWindow && bMenuVisible && pSetMenuBar )
     {
-        pSysWindow->SetMenuBar(pSetMenuBar);
+        lcl_setHostMenuBar(pSysWindow, pSetMenuBar);
         pSetMenuBar->SetDisplayable( true );
         return true;
     }
@@ -3275,10 +3349,12 @@ void SAL_CALL LayoutManager::frameAction( const FrameActionEvent& aEvent )
             implts_replaceMenuBarInPlace( u"private:resource/menubar/menubar"_ustr );
         }
 
+        // One layout pass. A second doLayout(true,true) during sticky ATTACH
+        // re-entered border/caption geometry on every new-doc and stacked with
+        // Python chrome sync — UI一体化 open↔close storms.
         implts_doLayout( true, false );
-        implts_doLayout( true, true );
-        // doLayout already places sticky AppLeft/AppRight panes — do not call
-        // layoutApp* again here (extra setPosSize/Invalidate caused vertical jitter).
+        if ( !bSticky )
+            implts_doLayout( true, true );
     }
     else if (( aEvent.Action == FrameAction_FRAME_UI_ACTIVATED ) || ( aEvent.Action == FrameAction_FRAME_UI_DEACTIVATING ))
     {
@@ -3516,7 +3592,7 @@ void SAL_CALL LayoutManager::elementRemoved( const ui::ConfigurationEvent& Event
                 {
                     SystemWindow* pSysWindow = getTopSystemWindow( xContainerWindow );
                     if ( pSysWindow && !m_bInplaceMenuSet )
-                        pSysWindow->SetMenuBar( nullptr );
+                        lcl_setHostMenuBar( pSysWindow, nullptr );
 
                     if ( xMenuBar.is() )
                         xMenuBar->dispose();
@@ -3626,6 +3702,11 @@ void SAL_CALL LayoutManager::setFastPropertyValue_NoBroadcast( sal_Int32       n
             // Do NOT doLayout here — start↔doc chrome must set left+right in one
             // batch, otherwise intermediate frames (left=240+right=400) jump.
             SolarMutexGuard g;
+            // Clamp leaked start-hero widths so sticky doLayout cannot cover
+            // the center (white void + start.html bleed into the chat rail).
+            if ( nHandle == static_cast<sal_Int32>(LayoutManagerPropHandle::DocSkillAppRightPaneWidth)
+                 && m_nAppRightPaneWidth > 480 )
+                m_nAppRightPaneWidth = 480;
             m_bMustDoLayout = true;
             if ( m_bAppRightPaneVisible )
                 implts_ensureAppRightPaneWindow();
@@ -3710,3 +3791,4 @@ com_sun_star_comp_framework_LayoutManager_get_implementation(
 }
 
 /* vim:set shiftwidth=4 softtabstop=4 expandtab: */
+

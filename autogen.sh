@@ -315,9 +315,11 @@ if (defined $ENV{NOCONFIGURE}) {
     # environment variables like the "ProgramFiles(x86)" one don't get
     # imported by the shell. So export it as PROGRAMFILESX86 instead.
     my $building_for_linux = 0;
+    my $building_for_android = 0;
     my $building_with_emscripten = 0;
     foreach my $arg (@args) {
         $building_for_linux = 1 if ($arg =~ /--host=x86_64.*linux/);
+        $building_for_android = 1 if ($arg =~ /--host=.*-android/);
         $building_with_emscripten = 1 if ($arg =~ /^--host=wasm.*-emscripten$/);
     }
 
@@ -326,7 +328,8 @@ if (defined $ENV{NOCONFIGURE}) {
 
     print "Running '" . join (" ", @args), "'\n";
 
-    if (`wslsys 2>/dev/null` ne "" && !$building_for_linux) {
+    # Windows-on-WSL needs ProgramFiles(x86); Linux/Android/Emscripten hosts do not.
+    if (`wslsys 2>/dev/null` ne "" && !$building_for_linux && !$building_for_android && !$building_with_emscripten) {
         if (!$ENV{"ProgramFiles(x86)"}) {
             print STDERR "To build for Windows on WSL, you need to set the WSLENV environment variable in the Control Panel to 'ProgramFiles(x86)'\n";
             print STDERR "If you actually do want to build for WSL (Linux) on WSL, pass a --host=x86_64-pc-linux-gnu option\n";
@@ -348,3 +351,4 @@ if (defined $ENV{NOCONFIGURE}) {
 # End:
 
 # vim:set ft=perl shiftwidth=4 softtabstop=4 expandtab: #
+

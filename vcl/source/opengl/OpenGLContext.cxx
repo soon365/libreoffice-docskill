@@ -9,6 +9,10 @@
 
 #include <chrono>
 
+#if defined(_WIN32)
+#include <prewin.h>
+#endif
+
 #include <thread>
 #include <vcl/opengl/OpenGLContext.hxx>
 #include <vcl/opengl/OpenGLHelper.hxx>
@@ -464,3 +468,4 @@ const SystemChildWindow* OpenGLContext::getChildWindow() const
 }
 
 /* vim:set shiftwidth=4 softtabstop=4 expandtab cinoptions=b1,g0,N-s cinkeys+=0=break: */
+

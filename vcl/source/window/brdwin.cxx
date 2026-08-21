@@ -36,6 +36,7 @@
 #include <vcl/settings.hxx>
 #include <vcl/toolbox.hxx>
 #include <vcl/ptrstyle.hxx>
+#include <algorithm>
 
 using namespace ::com::sun::star::uno;
 
@@ -1637,6 +1638,9 @@ void ImplBorderWindow::Tracking( const TrackingEvent& rTEvt )
 
 void ImplBorderWindow::Paint( vcl::RenderContext& rRenderContext, const tools::Rectangle& )
 {
+    // Do not fill the caption-button reserve here — that strip is painted by
+    // WinSalFrame (chassis + custom min/max/close). Filling it from VCL covers
+    // the buttons.
     if (mpBorderView)
         mpBorderView->DrawWindow(rRenderContext);
 }
@@ -1712,6 +1716,7 @@ void ImplBorderWindow::Resize()
             if ( !nMenuHeight )
                 nMenuHeight = mnOrgMenuHeight;
         }
+
         mpMenuBarWindow->setPosSizePixel(
                 nLeftBorder, nTopBorder,
                 aSize.Width()-nLeftBorder-nRightBorder,
@@ -1928,6 +1933,11 @@ void ImplBorderWindow::UpdateMenuHeight()
 void ImplBorderWindow::SetMenuBarWindow( vcl::Window* pWindow )
 {
     mpMenuBarWindow = pWindow;
+    // DocSkill A/B ROOT: caption merge DISABLED. DwmExtend+FRAMECHANGED at
+    // splash is the intermittent 0xC0000374 — main UI never appears, only the
+    // loading splash (loader retry makes it flash). Re-enable only after a
+    // caption design that never extends the frame during StartModule init.
+    (void)pWindow;
     UpdateMenuHeight();
     if ( pWindow )
         pWindow->Show();
@@ -2000,3 +2010,4 @@ void ImplBorderWindow::queue_resize(StateChangedType eReason)
 }
 
 /* vim:set shiftwidth=4 softtabstop=4 expandtab: */
+
